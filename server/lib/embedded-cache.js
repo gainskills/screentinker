@@ -42,7 +42,7 @@ function defaultCacheDir() {
  * @returns {string}  64-char hex SHA-256
  */
 function cacheKey(deviceId, itemId, itemUpdatedAt, profile) {
-  const payload = JSON.stringify([
+  const parts = [
     deviceId,
     itemId,
     itemUpdatedAt,
@@ -52,7 +52,16 @@ function cacheKey(deviceId, itemId, itemUpdatedAt, profile) {
     profile.colorDepth,
     profile.dither,
     profile.outputFormat,
-  ]);
+  ];
+  /*
+   * ⚠️ APPENDED ONLY WHEN PRESENT. A panel with no stated orientation and no MCU transpose renders
+   * exactly the bytes it always did, so its key (and so its ETag) must be exactly the old one too —
+   * any change here is a fleet-wide refresh: every e-ink panel misses its 304 and redraws at once.
+   */
+  if (profile.orientation || profile.mcuTranspose) {
+    parts.push(profile.orientation || null, profile.mcuTranspose ? 'mcu-transpose' : null);
+  }
+  const payload = JSON.stringify(parts);
   return crypto.createHash('sha256').update(payload).digest('hex');
 }
 

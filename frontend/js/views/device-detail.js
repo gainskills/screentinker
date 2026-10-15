@@ -275,6 +275,72 @@ function setDebugFrozen(frozen) {
   updateDebugTools();
 }
 
+let embeddedLogsHandler = null;
+
+function formatEmbeddedLogs(entry) {
+  if (!entry) return { meta: '', text: t('device.embedded.logs_none') };
+
+  let raw = entry.log_json || entry;
+  if (typeof raw === 'string') {
+    try { raw = JSON.parse(raw); } catch (_) {}
+  }
+
+  const logs = Array.isArray(raw?.logs) ? raw.logs : (Array.isArray(raw) ? raw : null);
+  const count = entry.log_count ?? raw?.log_count ?? logs?.length ?? 0;
+  const bat = entry.battery ?? raw?.battery;
+  const rssi = entry.wifi_rssi ?? raw?.rssi;
+  const ver = entry.version ?? raw?.version;
+  const uploadedAt = entry.uploaded_at ? new Date(entry.uploaded_at * 1000).toLocaleString() : new Date().toLocaleString();
+
+  const metaParts = [t('device.embedded.logs_meta_uploaded', { time: uploadedAt })];
+  if (ver) metaParts.push(t('device.embedded.logs_meta_version', { version: ver }));
+  if (bat != null && bat >= 0) metaParts.push(t('device.embedded.logs_meta_battery', { n: bat }));
+  if (rssi != null && rssi !== 0) metaParts.push(t('device.embedded.logs_meta_rssi', { n: rssi }));
+  metaParts.push(t('device.embedded.logs_meta_entries', { n: count }));
+
+  let text = '';
+  if (logs && logs.length > 0) {
+    text = logs.map(l => {
+      if (typeof l === 'string') return l;
+      const uptime = l.uptime_ms != null ? `[+${(l.uptime_ms / 1000).toFixed(2)}s]` : '';
+      const level = l.level ? `[${l.level}]` : '';
+      const tag = l.tag ? `[${l.tag}]` : '';
+      const msg = l.msg || l.message || JSON.stringify(l);
+      return [uptime, level, tag, msg].filter(Boolean).join(' ');
+    }).join('\n');
+  } else if (typeof raw === 'string') {
+    text = raw;
+  } else {
+    text = t('device.embedded.logs_empty_buffer');
+  }
+
+  return { meta: metaParts.join(' · '), text };
+}
+
+function renderEmbeddedLogsData(data) {
+  const metaEl = document.getElementById('embeddedLogsMeta');
+  const panelEl = document.getElementById('embeddedLogsPanel');
+  if (!metaEl || !panelEl) return;
+  const { meta, text } = formatEmbeddedLogs(data);
+  metaEl.textContent = meta;
+  panelEl.textContent = text;
+}
+
+/*
+ * The newest upload's BODY comes from GET /devices/:id/diagnostic-logs: GET /devices/:id carries
+ * only its metadata (diagnostic_logs_latest) and the socket event only says one arrived.
+ */
+async function refreshEmbeddedLogs(deviceId) {
+  try {
+    const r = await api.getDeviceDiagnosticLogs(deviceId, 1);
+    const latest = r && Array.isArray(r.logs) ? r.logs[0] : null;
+    if (latest) renderEmbeddedLogsData(latest);
+    return Boolean(latest);
+  } catch (_) {
+    return false;
+  }
+}
+
 /*
  * Clipboard with a fallback, because a self-hosted dashboard on plain http is NOT a secure context
  * and `navigator.clipboard` is simply absent there — the copy buttons elsewhere in this app quietly
@@ -692,6 +758,13 @@ export function render(container, deviceId) {
   on('screenshot-ready', screenshotHandler);
   on('playback-state', playbackHandler);
   on('device-log', logHandler);
+
+  embeddedLogsHandler = (data) => {
+    if (!currentDevice || data.device_id !== currentDevice.id) return;
+    refreshEmbeddedLogs(currentDevice.id);
+    showToast(t('device.embedded.logs_received', { n: data.log_count || 0 }));
+  };
+  on('embedded-logs', embeddedLogsHandler);
 }
 
 /*
@@ -972,14 +1045,15 @@ async function loadDevice(deviceId, activeTab = null) {
             <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
               <path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/><polyline points="7 10 12 15 17 10"/><line x1="12" y1="15" x2="12" y2="3"/>
             </svg>
-            ${t('device.ctl.force_update')}
+            ${isEmbeddedDevice(device) ? t('device.ctl.update_firmware') : t('device.ctl.force_update')}
           </button>
+          ${!isEmbeddedDevice(device) ? `
           <button class="btn btn-secondary btn-sm" id="clearUpdateCacheBtn" title="${t('device.ctl.clear_update_cache_tip')}">
             <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
               <polyline points="3 6 5 6 21 6"/><path d="M19 6v14a2 2 0 0 1-2 2H7a2 2 0 0 1-2-2V6m3 0V4a2 2 0 0 1 2-2h4a2 2 0 0 1 2 2v2"/>
             </svg>
             ${t('device.ctl.clear_update_cache')}
-          </button>` : ''}
+          </button>` : ''}` : ''}
           ${can('system.reboot') && !isEmbeddedDevice(device) ? `
           <button class="btn btn-danger btn-sm" id="shutdownBtn">
             <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
@@ -1099,6 +1173,11 @@ async function loadDevice(deviceId, activeTab = null) {
           <div class="info-card">
             <div class="info-card-label">${t('device.info.temperature')}</div>
             <div class="info-card-value small" id="telTemp">${latestTelemetry.temperature_c}&deg;C</div>
+          </div>` : ''}
+          ${latestTelemetry.humidity != null ? `
+          <div class="info-card">
+            <div class="info-card-label">${t('device.info.humidity')}</div>
+            <div class="info-card-value small" id="telHumidity">${t('device.info.humidity_value', { n: latestTelemetry.humidity })}</div>
           </div>` : ''}
           ${latestTelemetry.attached_display ? `
           <div class="info-card">
@@ -1357,7 +1436,24 @@ async function loadDevice(deviceId, activeTab = null) {
           </div>
         </div>
 
-        ${!isEmbeddedDevice(device) ? `
+        ${isEmbeddedDevice(device) ? `
+        <div style="margin-top:20px">
+          <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:8px">
+            <div>
+              <h4 style="font-size:13px;font-weight:600;margin:0">${t('device.embedded.logs_title')}</h4>
+              <div style="font-size:11px;color:var(--text-muted);margin-top:2px">
+                ${t('device.embedded.logs_hint')}
+              </div>
+            </div>
+            <div style="display:flex;gap:6px">
+              <button class="btn btn-secondary btn-sm" id="requestDiagLogsBtn">${t('device.embedded.logs_request')}</button>
+              <button class="btn btn-secondary btn-sm" id="copyDiagLogsBtn">${t('device.embedded.logs_copy')}</button>
+            </div>
+          </div>
+          <div id="embeddedLogsMeta" style="font-size:11px;color:var(--text-muted);margin-bottom:6px"></div>
+          <div id="embeddedLogsPanel" style="background:#0b0f1a;border:1px solid var(--border);border-radius:6px;padding:8px;height:220px;overflow-y:auto;font-family:monospace;font-size:11px;line-height:1.45;color:#cbd5e1;white-space:pre-wrap"></div>
+        </div>
+        ` : `
         <div style="margin-top:20px">
           <label style="display:flex;align-items:center;gap:8px;cursor:pointer;font-size:13px">
             <input type="checkbox" id="debugLogToggle"> ${t('device.debug.toggle')}
@@ -1375,7 +1471,7 @@ async function loadDevice(deviceId, activeTab = null) {
           </div>
           <div id="debugLogPanel" style="display:none;margin-top:8px;background:#0b0f1a;border:1px solid var(--border);border-radius:6px;padding:8px;height:220px;overflow-y:auto;font-family:monospace;font-size:11px;line-height:1.45;color:#cbd5e1"></div>
         </div>
-        ` : ''}
+        `}
 
 
         <!-- #109: PiP overlay tester. Pushes device:pip-show/clear via POST /api/pip
@@ -1986,7 +2082,7 @@ function headOfficeTriggerNotes(device) {
  * the other everyday controls stay as they are.
  */
 const CORP_GATED_CONTROLS = {
-  setServerUrlBtn: 'set_server_url', termRun: 'shell', apkInstall: 'install_apk', ptyConnect: 'shell',
+  setServerUrlBtn: 'set_server_url', termRun: 'shell', apkInstall: 'install_apk', ptyConnect: 'shell', forceUpdateBtn: 'update',
   launchAppBtn: 'launch', t2KioskOff: 'kiosk_unlock', screenOffBtn: 'screen_off', remoteScreenOffBtn: 'screen_off', shutdownBtn: 'shutdown',
   sysTimeout: 'set_screen_timeout', sendPipBtn: 'pip', blockDeviceBtn: 'block', powerSave: 'power',
 };
@@ -2749,6 +2845,37 @@ function setupActions(device) {
     showToast(ok ? t('device.debug.copied', { n: panel.childElementCount }) : t('device.debug.copy_failed'), ok ? 'success' : 'error');
   });
 
+  if (isEmbeddedDevice(device)) {
+    const showNoLogs = () => {
+      const panelEl = document.getElementById('embeddedLogsPanel');
+      if (panelEl) panelEl.textContent = t('device.embedded.logs_none_hint');
+    };
+    if (device.diagnostic_logs_latest) {
+      refreshEmbeddedLogs(device.id).then((found) => { if (!found) showNoLogs(); });
+    } else {
+      showNoLogs();
+    }
+
+    document.getElementById('requestDiagLogsBtn')?.addEventListener('click', () => {
+      sendCommand(device.id, 'upload_logs', {}, (ack) => {
+        if (ack && ack.delivered === false && ack.reason && ack.reason !== 'offline') {
+          showToast(t('device.embedded.logs_request_failed', { reason: ack.error || ack.reason }), 'error');
+        } else {
+          showToast(t('device.embedded.logs_requested'));
+        }
+      });
+    });
+
+    document.getElementById('copyDiagLogsBtn')?.addEventListener('click', async () => {
+      const panelEl = document.getElementById('embeddedLogsPanel');
+      const text = panelEl ? panelEl.textContent : '';
+      if (!text) { showToast(t('device.embedded.logs_nothing_to_copy'), 'error'); return; }
+      const header = `${device.name || device.id} — ${t('device.embedded.logs_title')} — ${new Date().toISOString()}`.trim();
+      const ok = await copyToClipboard(`${header}\n${'-'.repeat(header.length)}\n${text}\n`);
+      showToast(ok ? t('device.embedded.logs_copied') : t('device.embedded.logs_copy_failed'), ok ? 'success' : 'error');
+    });
+  }
+
   wireLocationSearch();
   document.getElementById('saveSettingsTopBtn')?.addEventListener('click', () => {
     document.getElementById('saveNotesBtn')?.click();
@@ -3135,8 +3262,35 @@ function setupActions(device) {
 
   // Force Update
   document.getElementById('forceUpdateBtn')?.addEventListener('click', () => {
+    if (isEmbeddedDevice(device)) { sendFirmwareUpdate(); return; }
     sendWithFeedback('update', 'Update', 'device.toast.update_triggered');
   });
+
+  /*
+   * An embedded panel has no socket: `update` is QUEUED and offered on its next poll, so "update
+   * check triggered" (or "device offline") would both be false. Say what will happen, and say when
+   * the panel has not reported its board, because then the firmware is chosen from its screen
+   * profile alone. A panel with no firmware here is refused with the reason (lib/embedded-firmware.js).
+   */
+  function sendFirmwareUpdate() {
+    sendCommand(device.id, 'update', {}, (ack) => {
+      const fw = ack && ack.firmware;
+      if (ack?.queued && fw) {
+        if (fw.board_verified) showToast(t('device.toast.fw_queued', { version: fw.version }), 'success');
+        else showToast(t('device.toast.fw_queued_unverified', { version: fw.version, preset: fw.preset }), 'warning');
+      } else if (ack?.reason === 'rejected') {
+        showToast(ack.code === 'EMBEDDED_BOARD_MISMATCH' ? t('device.toast.fw_board_mismatch') : t('device.toast.fw_no_firmware'), 'error');
+      } else if (ack?.reason === 'corporate') {
+        showToast(ack.error || t('device.toast.command_undeliverable', { cmd: t('device.ctl.update_firmware') }), 'error');
+      } else if (ack?.reason === 'unsupported') {
+        showToast(t('device.toast.command_unsupported', { cmd: t('device.ctl.update_firmware'), cap: ack.capability || '' }), 'error');
+      } else if (ack?.reason === 'no_ack') {
+        showToast(t('device.toast.command_no_ack', { cmd: t('device.ctl.update_firmware') }), 'error');
+      } else {
+        showToast(t('device.toast.command_undeliverable', { cmd: t('device.ctl.update_firmware') }), 'error');
+      }
+    });
+  }
 
   // Drops every staged APK on the panel so the next check downloads afresh. The escape hatch for a
   // player holding a bad download — a cached file that cannot install but is reused every attempt.
@@ -3894,6 +4048,8 @@ function updateTelemetryDisplay(telemetry) {
   if (telemetry.uptime_seconds) update('telUptime', formatUptime(telemetry.uptime_seconds));
   if (telemetry.ram_free_mb) update('telRam', t('device.info.size_free', { size: formatBytes(telemetry.ram_free_mb) }));
   if (telemetry.cpu_usage != null) update('telCpu', telemetry.cpu_usage.toFixed(1) + '%');
+  if (telemetry.temperature_c != null) update('telTemp', telemetry.temperature_c + '°C');
+  if (telemetry.humidity != null) update('telHumidity', t('device.info.humidity_value', { n: telemetry.humidity }));
 }
 
 // ----- diag-smoothness widget: show the frame stats it reports from the panel -----
@@ -3964,6 +4120,8 @@ export function cleanup() {
   if (screenshotHandler) off('screenshot-ready', screenshotHandler);
   if (playbackHandler) off('playback-state', playbackHandler);
   if (logHandler) off('device-log', logHandler);
+  if (embeddedLogsHandler) off('embedded-logs', embeddedLogsHandler);
+  embeddedLogsHandler = null;
   if (shellHandler) off('shell-result', shellHandler);   // #161 owner-tools listener
   teardownPty(true);   // leaving the page ends the interactive terminal on the device too
   if (screenshotInterval) clearInterval(screenshotInterval);
