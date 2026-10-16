@@ -3146,8 +3146,8 @@ export default {
   'widget.trans.duration': 'Duration (ms)',
   'widget.trans.scope': 'Applies to',
   'widget.trans.scope_next': 'Only the next item (advanced)',
-  'widget.trans.scope_all': 'Every item in the playlist (recommended)',
-  'widget.trans.scope_hint': 'One transition covers the whole playlist — drop this widget in anywhere and every image will transition. Use “only the next item” if you want a different effect at one specific spot.',
+  'widget.trans.scope_all': "Every item in its zone (recommended)",
+  'widget.trans.scope_hint': "A transition covers every item in its own zone: the whole playlist when it plays full screen, or one zone of a layout. Choose the zone on the playlist row. Use “Only the next item” for a different effect at one spot.",
   'widget.trans.play': 'Play',
   'widget.trans.pause': 'Pause',
   'widget.trans.unavailable': 'Transition preview unavailable',
@@ -8268,4 +8268,7 @@ export default {
   'account_delete.deleting': "Deleting…",
   'account_delete.err_confirm': "Type your email address exactly as shown.",
   'account_delete.err_password': "Enter your password.",
+  // playlist bulk Transition picker dialog
+  'playlist.bulk.transition_title': "Add a transition",
+  'playlist.bulk.transition_pick': "Choose the transition to play into each selected item.",
 };

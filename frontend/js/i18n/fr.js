@@ -1067,8 +1067,8 @@ export default {
   'widget.trans.duration': "Durée (ms)",
   'widget.trans.scope': "S'applique à",
   'widget.trans.scope_next': "Uniquement l'élément suivant (avancé)",
-  'widget.trans.scope_all': "Chaque élément de la playlist (recommandé)",
-  'widget.trans.scope_hint': "Une transition couvre toute la liste de lecture — déposez ce widget n'importe où et chaque image effectuera une transition. Utilisez « uniquement l'élément suivant » si vous souhaitez un effet différent à un endroit spécifique.",
+  'widget.trans.scope_all': "Chaque élément de sa zone (recommandé)",
+  'widget.trans.scope_hint': "Une transition couvre chaque élément de sa propre zone : toute la playlist en plein écran, ou une zone d'une mise en page. La zone se choisit sur la ligne de la playlist. Utilisez « Uniquement l'élément suivant » pour un effet différent à un endroit précis.",
   'widget.trans.play': "Lecture",
   'widget.trans.pause': "Pause",
   'widget.trans.unavailable': "Aperçu de la transition indisponible",
@@ -5021,4 +5021,9 @@ export default {
   'account_delete.deleting': "Suppression…",
   'account_delete.err_confirm': "Saisissez votre adresse e-mail exactement comme indiqué.",
   'account_delete.err_password': "Saisissez votre mot de passe.",
+  // playlist bulk Transition picker dialog
+  'playlist.bulk.transition_title': "Ajouter une transition",
+  'playlist.bulk.transition_pick': "Choisissez la transition qui mène à chaque élément sélectionné.",
+  'playlist.bulk.apply': "Appliquer",
+  'playlist.bulk.no_transition': "Aucun widget de transition dans cet espace de travail",
 };

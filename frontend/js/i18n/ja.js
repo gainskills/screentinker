@@ -1061,8 +1061,8 @@ export default {
   'widget.trans.duration': "期間 (ミリ秒)",
   'widget.trans.scope': "に適用",
   'widget.trans.scope_next': "次の項目のみ（上級）",
-  'widget.trans.scope_all': "プレイリスト内のすべてのアイテム (推奨)",
-  'widget.trans.scope_hint': "1つのトランジションがプレイリスト全体に適用されます。このウィジェットを任意の場所に配置すると、すべての画像にトランジションが適用されます。特定の箇所だけ別のエフェクトを使いたい場合は、「次の項目のみ」を使用します。",
+  'widget.trans.scope_all': "ゾーン内のすべてのアイテム (推奨)",
+  'widget.trans.scope_hint': "トランジションは、そのゾーン内のすべてのアイテムに適用されます。全画面のプレイリストではプレイリスト全体、レイアウトでは1つのゾーンです。ゾーンはプレイリストの行で選択します。特定の箇所だけ別のエフェクトにするには「次の項目のみ」を使用します。",
   'widget.trans.play': "プレイ",
   'widget.trans.pause': "一時停止",
   'widget.trans.unavailable': "トランジションのプレビューは利用できません",
@@ -5021,4 +5021,9 @@ export default {
   'account_delete.deleting': "削除中…",
   'account_delete.err_confirm': "表示されているとおりにメールアドレスを入力してください。",
   'account_delete.err_password': "パスワードを入力してください。",
+  // playlist bulk Transition picker dialog
+  'playlist.bulk.transition_title': "トランジションを追加",
+  'playlist.bulk.transition_pick': "選択した各アイテムに切り替わるときのトランジションを選んでください。",
+  'playlist.bulk.apply': "適用",
+  'playlist.bulk.no_transition': "このワークスペースにトランジションウィジェットがありません",
 };

@@ -421,8 +421,8 @@ export default {
   'widget.type.transition.name': '转场效果', 'widget.type.transition.desc': '播放列表项目之间的动画切换',
   'widget.trans.shader': '效果', 'widget.trans.multi_hint': '可选择一个或多个效果。选择多个时播放器会轮换使用；点击名称可预览并调整。',
   'widget.trans.params': '参数', 'widget.trans.duration': '时长（毫秒）', 'widget.trans.scope': '应用范围',
-  'widget.trans.scope_next': '仅下一项（高级）', 'widget.trans.scope_all': '播放列表中的每一项（推荐）',
-  'widget.trans.scope_hint': '一个转场可覆盖整个播放列表：将此小组件放在任意位置，所有图片都会使用转场。仅在某个位置需要特殊效果时，再选择“仅下一项”。',
+  'widget.trans.scope_next': '仅下一项（高级）', 'widget.trans.scope_all': "所在区域中的每一项（推荐）",
+  'widget.trans.scope_hint': "转场覆盖其所在区域中的每一项：全屏播放列表即整个播放列表，布局中则为其中一个区域。区域在播放列表的行上选择。如需在某个位置使用不同效果，请选择“仅下一项”。",
   'widget.trans.play': '播放', 'widget.trans.pause': '暂停', 'widget.trans.unavailable': '转场预览不可用', 'widget.trans.compile_error': '着色器编译失败',
   'widget.dirsearch.source_label': '目录看板', 'widget.dirsearch.source_hint': '从选定看板实时读取条目，不会复制数据。',
   'widget.dirsearch.source_empty': '请先创建目录看板；此小组件会搜索已有看板。', 'widget.dirsearch.title_label': '标题',
@@ -3932,4 +3932,9 @@ export default {
   'account_delete.deleting': "正在删除…",
   'account_delete.err_confirm': "请完全按显示内容输入您的电子邮件地址。",
   'account_delete.err_password': "请输入您的密码。",
+  // playlist bulk Transition picker dialog
+  'playlist.bulk.transition_title': "添加转场",
+  'playlist.bulk.transition_pick': "选择转入每个所选项目时使用的转场。",
+  'playlist.bulk.apply': "应用",
+  'playlist.bulk.no_transition': "此工作区中没有转场小组件",
 };
