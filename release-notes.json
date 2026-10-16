@@ -14,6 +14,17 @@
   ],
   "releases": [
     {
+      "version": "3.0.1",
+      "date": "2026-10-16",
+      "notes": [
+        "Security fixes: tighter checks on content requests, screen-share guests, deactivated accounts and passkey sign-in, and protection against text crafted to slow the server down. Updating is recommended.",
+        "You can now delete your own account from Settings or the Manager app.",
+        "Alerts can go to Telegram, and Seeed Studio reTerminal e-paper panels are supported.",
+        "Transitions now stay inside the zone they're placed in, and Android plays them inside zones too. Layout zones with transparent images no longer show black on Raspberry Pi, Windows, Mac, Samsung and Roku players.",
+        "Screen previews refresh after pairing, interactive pages on Android retry when the network is slow to come up, and the web player gets a Reload button and a clearer note when changes are waiting to be published."
+      ]
+    },
+    {
       "version": "3.0.0",
       "date": "2026-10-14",
       "notes": [

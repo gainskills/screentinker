@@ -2,8 +2,81 @@
 
 ## 3.0.1
 
+Security fixes, the fixes from the first days of 3.0 in the field, account deletion, Telegram alerts,
+reTerminal E-Series panels, and transitions inside layout zones on Android. Upgrading from 3.0.0 needs
+no extra steps; from 2.6.x, follow `docs/upgrading-to-3.0.md`.
+
+### Upgrade notes
+
+- **`upgrade.sh` no longer lets apt's `needrestart` restart the server mid-upgrade** (#636). On prod
+  the 3.0.0 upgrade's Node install triggered a restart whose dependency check ran `npm` alongside
+  the upgrade's own `npm ci`, leaving files missing from `node_modules`. The script now runs apt with
+  `NEEDRESTART_MODE=l` and `NEEDRESTART_SUSPEND=1`, and writes `server/.upgrade-in-progress`, which
+  the server's dependency check waits for (up to 15 minutes; a stale marker is ignored).
+- Additive schema only: `devices.reported_orientation`, `devices.reported_board`,
+  `device_telemetry.humidity` and the `device_diagnostic_logs` table (reTerminal panels).
+  No dependency changes.
+- `PREVIEW_REFRESH=off` turns off the automatic preview screenshot after pairing or a playlist
+  change (#645); `PREVIEW_REFRESH_*` tunes it.
+
+### Added
+
+- **Delete your own account** (#643): Settings → Account, the Manager app, and a public
+  `/delete-account` page explaining how. It asks for your email, then your password (plus your
+  2FA code), or a sign-in within the last 10 minutes for SSO and passkey accounts. It cancels a
+  subscription first and refuses while you own an organization with other members or are the
+  server's last platform admin. Google Play requires this for the ScreenTinker Manager app.
+- **Telegram alerts** (#648): a sixth alert channel, next to email, Slack, Teams, PagerDuty and
+  webhook, for screen offline, back online, screen problem and screen OK. The bot token is masked
+  in the dashboard and kept out of every log and error. After a 429 from any channel, that channel
+  pauses for the rest of the minute instead of retrying at once. Requested by @arminfauland (#646).
+- **Seeed Studio reTerminal E-Series e-paper panels** (#644, from @renebohne's #638): profiles for
+  the E1001–E1004 and the Sticky, Spectra 6 colour and 16-level gray rendering with dithering,
+  rotation, temperature and humidity telemetry, diagnostic log uploads, and checksum-verified
+  firmware updates served only from the server's own `server/firmware/` folder.
+- **Android: shader transitions inside layout zones** (#650), as on the Pi, Windows and Mac player.
+  A transition placed in a zone wipes that zone only while the others keep playing.
+- **An HTML bundle can ask to be skipped** (#654) with
+  `parent.postMessage({ type: 'screentinker:skip', reason }, '*')`. The player moves on and the
+  item doesn't count as a play. It's ignored on a shared clock (walls, synced groups), when nothing
+  else can play, or when the same item skipped last time. Requested by @arminfauland (#649).
+- **Web player: Reload Player** on the device's Info tab, and an "Unpublished changes" notice with
+  **Review and publish** on its Now Playing tab (#653).
+- **A how-to guide: "Widgets, layouts and transitions"** at
+  `/guides/digital-signage-widgets-layouts-transitions.html` (#651).
+
 ### Fixed
 
+- **Android: an interactive web page that fails to load is retried instead of skipped** (#639).
+  A panel up before its network, a DNS hiccup or a 5xx used to skip the item, so a one-item
+  playlist stayed blank until the next round. The page now reloads with the same backoff as web
+  items (2, 4, 8, 15, then every 30 s) while nobody is using it, and stays hidden until it loads
+  cleanly. Other 4xx errors still skip. Thanks to @visimpres-glitch.
+- **Web player behind a proxy that refuses WebSocket** now falls back to polling instead of
+  retrying for ever (#653). The device page's add and remove messages now say screens update once
+  you publish. Thanks to @davidsrrh for the report (#632).
+- **Transitions:**
+  - a transition applied to every zone's items, or landed on another zone's first item; each zone
+    is now resolved on its own (#647);
+  - an edited transition widget never reached the screens (#652);
+  - the Transition form's hint now says it covers its own zone, and the bulk picker is a dialog
+    instead of the browser's `prompt` (#652).
+- **Dashboard sockets joined every workspace the user could open** (676 rooms for a platform admin
+  on prod), receiving every screen's live events. They now join the current workspace only; a
+  device page opened in another workspace asks for that screen alone (#637).
+- **Screen previews stayed on the pairing-code frame after pairing.** The server now asks for one
+  screenshot shortly after pairing or a real playlist change, with per-screen and per-node limits
+  (#642, #645). The "Find feeds" preview no longer shows broken images for http feeds (#642).
+- **Content freshness** missed dates in dashed and dotted file names such as
+  `christmas-2025-menu.png` (#641).
+- **"Set up my screens with A.I."** failed with some local models' replies (qwen2.5 14B went from
+  1 in 3 to 3 in 3 usable) (#641).
+- **Generate captions** refused a local Whisper server that the platform admin had allowed for
+  private A.I. on a hosted instance; captions now also follow "only private A.I." (#641).
+- Pairing an imported screen, and declining a content request, used the browser's `prompt`; both
+  are in-app dialogs now. Declining sends the request's version, so two reviewers can't both decide
+  it. The Simple view's Add a screen guide now shows the upgrade prompt at a plan limit (#640).
+- The Slides page could throw when left while it was still loading (#655).
 - The import tests could leave a `screentinker-import-*` folder in tmp, and fail intermittently.
   The partial file of a refused zip entry was removed before its asynchronous open had finished,
   so it could be created afterwards. It is now removed once the stream has closed, before the
@@ -46,6 +119,29 @@
   All now run in linear time, and their output is unchanged.
 - Three file paths built from a device ID, a disk-import name or an upload path are now checked
   against their own folder at the point of use. None was reachable with untrusted input.
+
+### Also new in 3.0.0 (missing from its notes)
+
+- **News feeds are read by the server** instead of every screen asking rss2json.com. RSS, Atom and
+  JSON Feed, feed discovery from a pasted site, and headlines from a site that has no feed (honouring
+  robots.txt). Screens contact only your server, and there's a new "headlines with pictures" look.
+- **Samsung Tizen: portrait video** plays from TV-safe copies of tall videos, with a fit fix.
+- **YouTube "Play to end"** (#624; #628, #629) plays a video to its end instead of looping it until the
+  item's duration, which is now only a fallback. It's on for YouTube items you add, in full screen and
+  in zones, on Android, the web player, Tizen and the Pi/Windows player. Walls, synced groups and
+  one-item playlists keep their shared clock.
+
+### Contributors
+
+- @renebohne: Seeed Studio reTerminal E-Series support, 19 commits (#638, merged in #644).
+- @visimpres-glitch: interactive pages retry instead of skipping (#639).
+- @arminfauland requested Telegram alerts (#646) and bundle skips (#649); @KiwasoVR reported the
+  black layout zones (#657); @davidsrrh reported web players missing changes (#632).
+
+### Sponsors
+
+Thank you to @Semetra22 and @hapishyguy for sponsoring ScreenTinker on GitHub Sponsors, and to everyone
+who sponsors privately.
 
 ## 3.0.0
 
