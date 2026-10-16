@@ -1,5 +1,43 @@
 # Changelog
 
+## 3.0.1
+
+### Fixed
+
+- The import tests could leave a `screentinker-import-*` folder in tmp, and fail intermittently.
+  The partial file of a refused zip entry was removed before its asynchronous open had finished,
+  so it could be created afterwards. It is now removed once the stream has closed, before the
+  import rejects. The import's temporary files are also removed before its reply is sent, rather
+  than just after.
+
+### Security
+
+- A content request could reach screens before approval. In a workspace without "require
+  approval", a published smart playlist whose rules matched the upload (its type, the form's
+  folder, or the requester-chosen title) republished with the pending file in it. A request's
+  file is now inactive until it is approved, and smart playlists also skip any file with a
+  pending request.
+- Content-request emails built their links from the request's Host header when `APP_URL` was
+  unset. The reviewer notice and the requester's status link now use the same public origin as
+  every other emailed link.
+- Guests joining a screen share by code received the organization's long-lived TURN username
+  and password. Guests now get STUN only. Where the server's TURN uses a shared secret
+  (`GO2RTC_TURN_SECRET`), they still get its short-lived credentials.
+- Passkey sign-in issued a session to an account its organization had deactivated (SCIM).
+  It now returns 403 `account_disabled`, as password sign-in does.
+- Crafted text could tie up the server for seconds to minutes (regular expressions that slow down
+  sharply on long inputs). This affected:
+  - news feeds and feed discovery: any feed a widget points at, up to 4 MB, plus pages, sitemaps
+    and robots.txt
+  - uploaded or transcribed captions
+  - A.I. starter and translation text
+  - stock-media results
+  - a few trailing-slash trims on admin settings
+
+  All now run in linear time, and their output is unchanged.
+- Three file paths built from a device ID, a disk-import name or an upload path are now checked
+  against their own folder at the point of use. None was reachable with untrusted input.
+
 ## 3.0.0
 
 The ease-of-use release: a guided first run, a simple menu for new accounts, trial-to-paid that

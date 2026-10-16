@@ -407,6 +407,38 @@ test('email-domain forms: exact domain, codes are bounded, and bypass attempts f
   assert.equal(db.prepare('SELECT verified_via FROM content_requests WHERE ref = ?').get(sub.json.ref).verified_via, 'email');
 });
 
+test('request emails never build their links from a forged Host header', async () => {
+  // No APP_URL (deleted at the top), not SELF_HOSTED: the Host header must not steer a mailed link.
+  mailOn();
+  const f = await makeForm('ed', { access_mode: 'email', allowed_domains: 'campus.edu' });
+  db.prepare('DELETE FROM request_email_challenges').run();
+  assert.equal((await pub('POST', `/form/${f.code}/verify`, { name: 'Hal', email: 'hal@campus.edu' })).status, 200);
+  const code = /(\d{6})/.exec(mails[mails.length - 1].text)[1];
+  const ok = await pub('POST', `/form/${f.code}/verify/confirm`, { email: 'hal@campus.edu', code });
+  assert.equal(ok.status, 201, JSON.stringify(ok.json));
+  const ticket = ok.json.ticket;
+  const up = await upload(f.code, ticket, await png(1920, 1080));
+  assert.ok(!up.refused);
+  mails.length = 0;
+  const body = JSON.stringify(goodBody(f, { upload_id: up.id, title: 'Host test' }));
+  // fetch will not send a Host of our choosing; a raw request will.
+  const status = await new Promise((resolve, reject) => {
+    const rq = require('http').request({
+      host: '127.0.0.1', port: server.address().port, method: 'POST', path: `/api/public/requests/form/${f.code}/submit`,
+      headers: { Host: 'evil.example', 'Content-Type': 'application/json', 'Content-Length': Buffer.byteLength(body), 'X-Request-Ticket': ticket },
+    }, (res) => { res.resume(); res.on('end', () => resolve(res.statusCode)); });
+    rq.on('error', reject);
+    rq.end(body);
+  });
+  assert.equal(status, 201);
+  const receipt = mails.find((m) => m.to === 'hal@campus.edu' && /received/.test(m.subject));
+  const review = mails.find((m) => m.to === 'ed@req.local' && /New content request/.test(m.subject));
+  assert.ok(receipt && review, 'both the receipt and the reviewer notice were sent');
+  assert.match(receipt.text, /\/r\/status#/);
+  assert.match(review.text, /\/app#\/requests/);
+  for (const m of mails) assert.ok(!/evil\.example/.test(`${m.text}${m.html || ''}`), `forged host in "${m.subject}"`);
+});
+
 // ─── SSO forms ───────────────────────────────────────────────────────────────────────────────
 
 test('SSO forms: only the form\'s own organization\'s provider, a confined and verified address', async () => {
@@ -576,6 +608,77 @@ test('the requester can withdraw a waiting request from the status link', async 
   const row = db.prepare('SELECT * FROM content_requests WHERE ref = ?').get(r.json.ref);
   assert.equal(db.prepare('SELECT status FROM submissions WHERE id = ?').get(row.submission_id).status, 'withdrawn');
   assert.equal((await pub('POST', '/status/cancel', { token: r.json.status_token })).status, 409);
+});
+
+test('a smart playlist never picks up a request before it is approved (approval off), and does after', async () => {
+  // WS has require_approval off, which is where a smart refresh publishes additions straight to screens.
+  const smart = require('../lib/smart-playlist');
+  const playlists = require('../routes/playlists');
+  const http = require('http');
+  const { Server } = require('socket.io');
+  const setupDeviceSocket = require('../ws/deviceSocket');
+  const sockServer = http.createServer();
+  const realIo = new Server(sockServer);
+  setupDeviceSocket(realIo);
+  const SPL = 'pl-req-smart', SDEV = 'd-req-smart';
+  try {
+    // "name contains" on the title the requester chooses: the rule a requester can aim at.
+    ins("INSERT INTO playlists (id,user_id,workspace_id,name,status,smart_rules) VALUES (?,?,?,?,'draft',?)", SPL, U.admin, WS, 'Smart posters',
+      JSON.stringify(smart.normalizeRules({ match: 'all', rules: [{ field: 'name', op: 'contains', value: 'Smartmatch' }] })));
+    ins("INSERT INTO devices (id,workspace_id,name,status,playlist_id,playlist_source) VALUES (?,?,?,'offline',?,'device')", SDEV, WS, 'Smart screen', SPL);
+    releases.releasePlaylist(db, SPL, io, { actor: { userId: U.admin, kind: 'user' } });
+    const refresh = () => smart.refreshNow(db, (id, seen) => playlists.publishPlaylist(id, io, seen), WS);
+    const inSnapshot = (cid) => (JSON.parse(db.prepare('SELECT published_snapshot FROM playlists WHERE id = ?').get(SPL).published_snapshot || '[]')).some((i) => i.content_id === cid);
+    const inPayload = (cid) => JSON.stringify(setupDeviceSocket.buildPlaylistPayload(SDEV)).includes(cid);
+
+    const f = await makeForm();
+    const submitOne = async (email) => {
+      const r = await fullSubmit(f, { email, body: { title: `Smartmatch ${email}` } });
+      assert.equal(r.status, 201, JSON.stringify(r.json));
+      return { r, row: db.prepare('SELECT * FROM content_requests WHERE ref = ?').get(r.json.ref) };
+    };
+    const a = await submitOne('sm-a@x.org');
+    const rej = await submitOne('sm-rej@x.org');
+    const wd = await submitOne('sm-wd@x.org');
+    for (const x of [a, rej, wd]) assert.equal(db.prepare('SELECT is_active FROM content WHERE id = ?').get(x.row.content_id).is_active, 0, 'a waiting request is switched off');
+
+    refresh();
+    for (const x of [a, rej, wd]) {
+      assert.ok(!inSnapshot(x.row.content_id), 'not in the smart playlist while it waits');
+      assert.ok(!inPayload(x.row.content_id), 'not in what the screen is sent while it waits');
+    }
+    // Belt and braces: even switched on by something else, a pending request is not selected.
+    db.prepare('UPDATE content SET is_active = 1 WHERE id = ?').run(a.row.content_id);
+    refresh();
+    assert.ok(!inSnapshot(a.row.content_id), 'a pending request is excluded even if active');
+    db.prepare('UPDATE content SET is_active = 0 WHERE id = ?').run(a.row.content_id);
+
+    // Rejected and withdrawn requests stay out.
+    assert.equal((await call('POST', `/api/content-requests/requests/${rej.row.id}/reject`, 'ed', { reason: 'No thanks' })).status, 200);
+    assert.equal((await pub('POST', '/status/cancel', { token: wd.r.json.status_token })).status, 200);
+    refresh();
+    for (const x of [rej, wd]) {
+      assert.ok(!inSnapshot(x.row.content_id), 'rejected / withdrawn: not in the smart playlist');
+      assert.ok(!inPayload(x.row.content_id), 'rejected / withdrawn: not sent to the screen');
+    }
+
+    // Approval switches it on and tells the smart playlists; the refresh then carries it.
+    const notified = [];
+    const realNotify = smart.notifyContentChanged;
+    smart.notifyContentChanged = (ws) => notified.push(ws);
+    let ap;
+    try { ap = await call('POST', `/api/content-requests/requests/${a.row.id}/approve`, 'ed'); } finally { smart.notifyContentChanged = realNotify; }
+    assert.equal(ap.status, 200, JSON.stringify(ap.json));
+    assert.equal(db.prepare('SELECT is_active FROM content WHERE id = ?').get(a.row.content_id).is_active, 1);
+    assert.ok(notified.includes(WS), 'approval wakes the smart playlists');
+    refresh();
+    assert.ok(inSnapshot(a.row.content_id), 'approved: in the smart playlist');
+    assert.ok(inPayload(a.row.content_id), 'approved: sent to the screen');
+    for (const x of [rej, wd]) assert.ok(!inSnapshot(x.row.content_id));
+  } finally {
+    realIo.close(); sockServer.close();
+    db.prepare('DELETE FROM devices WHERE id = ?').run(SDEV);
+  }
 });
 
 // ─── approval on: reviewers decide, and the gate sees a real approval ────────────────────────

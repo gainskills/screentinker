@@ -33,6 +33,8 @@ const { execFile } = require('child_process');
 const { v4: uuidv4 } = require('uuid');
 const config = require('../../config');
 const { encrypt, decrypt } = require('../secretbox');
+const { stripTags } = require('../strip-tags');
+const { trimTrailing } = require('../trim-trailing');
 
 const MAX_AUDIO_SEC = 60 * 60;
 const MAX_UPLOAD_BYTES = 25 * 1024 * 1024;   // OpenAI's limit; local servers take it too
@@ -69,7 +71,7 @@ function endpointAllowed(url, workspaceId) {
 function saveStt(db, workspaceId, body) {
   const b = body && typeof body === 'object' ? body : {};
   const cur = db.prepare('SELECT stt_base_url, stt_model, stt_api_key_enc FROM ai_settings WHERE workspace_id = ?').get(workspaceId) || {};
-  let base = b.base_url !== undefined ? String(b.base_url || '').trim().replace(/\/+$/, '') : (cur.stt_base_url || '');
+  let base = b.base_url !== undefined ? trimTrailing(String(b.base_url || '').trim(), '/') : (cur.stt_base_url || '');
   if (base.length > 500) return { ok: false, error: 'Base URL is too long' };
   if (base && !endpointAllowed(base, workspaceId)) return { ok: false, error: 'Endpoint URL not allowed (private/internal addresses are blocked on this instance).' };
   // No control characters: the model name is written into a multipart body as a field value.
@@ -102,8 +104,7 @@ function fmtTs(sec) {
 }
 /** Cue text as plain words: no tags, no entities beyond the three VTT needs, no stray arrows. */
 function cleanText(t) {
-  return String(t || '')
-    .replace(/<[^>]*>/g, '')
+  return stripTags(String(t || ''))
     .replace(/&nbsp;/g, ' ').replace(/&lt;/g, '<').replace(/&gt;/g, '>').replace(/&amp;/g, '&')
     .replace(/-->/g, '→')
     .replace(/[\u0000-\u0008\u000b-\u001f\u007f]/g, '')
