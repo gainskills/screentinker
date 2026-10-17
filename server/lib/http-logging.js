@@ -49,11 +49,11 @@ function authenticationFailure(ip, method, { write = writeStdout } = {}) {
   } catch (_) { /* observability must not change the authentication outcome */ }
 }
 
-function accessLogger({ getClientIp, write = writeStdout }) {
+function accessLogger({ getClientIp, write = writeStdout } = {}) {
   return (req, res, next) => {
     const started = process.hrtime.bigint();
     let ip = '-';
-    try { ip = clientAddress(getClientIp(req)) || clientAddress(req.socket?.remoteAddress) || '-'; } catch (_) {}
+    try { ip = clientAddress(getClientIp?.(req)) || clientAddress(req.socket?.remoteAddress) || '-'; } catch (_) {}
     let recorded = false;
     const record = () => {
       if (recorded) return;

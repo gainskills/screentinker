@@ -16,7 +16,7 @@ ScreenTinker is a free, open-source **digital signage CMS** you can self-host on
 
 **Runs on any screen** — Android TV, Fire TV, Samsung Tizen, LG webOS, Amazon Vega OS, Roku, Raspberry Pi, Windows, ChromeOS, or any web browser. No per-device player licence, no hardware lock-in.
 
-**Why self-host?** Keep your content and data on your own infrastructure, avoid per-screen SaaS fees, run air-gapped on a private LAN, and read or fork the source. Set `SELF_HOSTED=true` for enterprise accounts without a trial by default; size the server for your media storage, rendering and traffic.
+**Why self-host?** Keep your content and data on your own infrastructure, avoid per-screen SaaS fees, run air-gapped on a private LAN, and read or fork the source. Set `SELF_HOSTED=true` to run your own instance; follow [Self-Hosting](#self-hosting) for setup.
 
 **Hosted version:** [screentinker.com](https://screentinker.com) — free tier available, no credit card required.
 **Guides:** [What is digital signage?](https://screentinker.com/guides/what-is-digital-signage.html) · [Open-source digital signage](https://screentinker.com/guides/open-source-digital-signage.html) · [Self-hosting guide](https://screentinker.com/guides/self-hosted-digital-signage.html)
@@ -178,9 +178,8 @@ a kiosk and it has not been certified on hardware; see [docs/vega-player.md](doc
 - Node.js **22.14+** — required. Since 3.0 the server refuses to start on an older Node (exit code 78)
   rather than crash-looping; see [Upgrading to 3.0](docs/upgrading-to-3.0.md). `.nvmrc` pins the major.
 - Linux, macOS, or Windows
-- SQLite (bundled via `better-sqlite3`; no separate database server needed). Native dependency
-  installation needs the platform's build tools; on Linux, install Python 3, make and a C++ toolchain.
-  Linux prebuilds require glibc 2.34+ or musl. See [Node and database requirements](docs/operations.md#upgrading-nodejs).
+- SQLite is bundled through `better-sqlite3`. On Linux, installation requires Python 3, make
+  and a C++ compiler. See [platform requirements](docs/operations.md#upgrading-nodejs).
 - **ffmpeg** (optional but recommended) — powers video thumbnails and duration extraction
   (`sudo apt-get install ffmpeg` / `brew install ffmpeg`). Without it, videos upload and
   play fine but show no thumbnail in the content library. The Docker image includes it.
@@ -200,25 +199,15 @@ npm start
 
 The server starts on port 3001 (HTTP). If TLS certificates are present in `server/certs/`, HTTPS
 uses port 3443 and HTTP redirects to it. Open the URL shown in the startup banner. The first
-registered user becomes the platform administrator. In self-hosted mode, new accounts receive
-Enterprise without a trial by default; `SELF_HOSTED_SIGNUP_PLAN=trial` changes later signups
-to a Pro trial.
+registered user becomes the platform administrator.
 
 Schema migrations run automatically on first boot — no manual migration commands at any point in the lifecycle.
-
-**Environment loading:** `npm start` and `npm run dev` load `server/.env`. Direct
-`node server.js`, pm2 and systemd do not load it automatically. Configure those processes with
-explicit environment variables or an environment file (for example systemd `Environment=` /
-`EnvironmentFile=`); for pm2 use `SELF_HOSTED=true pm2 restart <id> --update-env`, then `pm2 save`.
-The app does not automatically load a repository-root `.env`. At boot it warns about configuration
-keys found in an environment file that are not in effect.
 
 ### Before public access
 
 Create the first administrator while access is restricted to your machine or trusted network.
 `DISABLE_REGISTRATION=true` blocks later self-service signups but still permits first-user setup
-on an empty database. `SELF_HOSTED=true` controls signup plans and hosted behavior; it does not
-restrict network access.
+on an empty database.
 
 Set `APP_URL` to the address users will visit so password-reset, verification and invitation
 links use a fixed origin. Preserve the generated `certs/.jwt_secret`; leave `JWT_SECRET` unset
@@ -231,16 +220,13 @@ own TLS listener. Keep backend ports private when using a proxy or Tunnel. See
 
 ### Environment Variables
 
-Defaults below apply when a variable is unset. The supplied `.env.example` explicitly enables
-`SELF_HOSTED` and `HIDE_BILLING`; review it before copying it into `server/.env`.
-
 | Variable | Description | Default |
 |----------|-------------|---------|
 | `PORT` | HTTP port | `3001` |
 | `HTTPS_PORT` | HTTPS port (used when SSL certs are present) | `3443` |
 | `NODE_ENV` | Runtime env (`production` enables Express production optimizations + stricter error handling) | _(none)_ |
-| `SELF_HOSTED` | New accounts receive Enterprise without a trial by default; the first account is the platform administrator. | `false` |
-| `SELF_HOSTED_SIGNUP_PLAN` | Plan policy for later self-hosted signups: `enterprise` or `trial` (Pro trial, then Free). The first self-hosted account always receives Enterprise. | `enterprise` |
+| `SELF_HOSTED` | Enable self-hosted mode. New accounts receive Enterprise by default. | `false` |
+| `SELF_HOSTED_SIGNUP_PLAN` | Plan for accounts created after the first self-hosted account: `enterprise` or `trial` (14-day Pro trial, then Free). | `enterprise` |
 | `ACCESS_LOG` | Emit HTTP access records to the application console. Authentication-failure events are always emitted. See [server logs](docs/operations.md#server-logs-and-fail2ban). | `false` |
 | `OUTBOUND_ALLOW_HOSTS` | Hosts, `*.suffixes`, IPs or CIDRs that calendars, data sources, webhooks, OIDC and AI may reach on a private network (refused by default). Cloud metadata stays blocked. See [Outbound requests](docs/outbound-requests.md). | _(none)_ |
 | `OUTBOUND_ALLOW_PRIVATE` | Open every private-network range at once (single-tenant installs) | `false` |
@@ -249,7 +235,7 @@ Defaults below apply when a variable is unset. The supplied `.env.example` expli
 | `DISABLE_HOMEPAGE` | Redirect `/` to `/app` instead of serving the marketing landing page. For internal-only self-hosted deployments. | `false` |
 | `VIEW_ONLY_ENABLED` | View-only display links (`/view/<token>`). Each display is still off until a workspace admin turns it on. `false` removes the feature from the instance — see [View-only display access](docs/view-only-access.md). | `true` when `SELF_HOSTED=true`, else `false` |
 | `VIEW_TRUSTED_PROXIES` | Comma-separated proxy addresses/CIDRs whose `X-Forwarded-For` the view-only **network** check believes. Unset = only the TCP peer counts. | unset |
-| `APP_URL` | Canonical public URL for emailed password-reset, verification and invitation links, and billing callbacks. Set it for deployed instances to prevent request headers steering emailed links. | _(none)_ |
+| `APP_URL` | Public URL used in emailed links and billing callbacks. | _(none)_ |
 | `JWT_SECRET` | JWT signing key, also the source of the key that encrypts saved secrets. Auto-generated into `certs/.jwt_secret` if not set. ⚠️ Changing it later signs everyone out and makes saved secrets unreadable; the server warns at boot if it changed. | _(auto)_ |
 | `SSL_CERT` | Path to SSL certificate | `server/certs/cert.pem` |
 | `SSL_KEY` | Path to SSL private key | `server/certs/key.pem` |
@@ -446,9 +432,8 @@ one-function patch adding VP8/VP9 to the receive set) and use it in place of
 
 #### Stripe (Billing)
 
-Stripe is optional. A self-hosted instance grants Enterprise to new accounts by default without
-Stripe keys. Omitting keys alone does not select self-hosted mode or remove plan limits; set
-`SELF_HOSTED=true`. Configure Stripe only if you intend to offer billing on your instance.
+To charge users on your instance, configure your own Stripe keys. Stripe is not required
+for self-hosting with `SELF_HOSTED=true`.
 
 1. Create a [Stripe account](https://stripe.com)
 2. Create products/prices for each plan in the Stripe dashboard
@@ -470,9 +455,7 @@ Stripe keys. Omitting keys alone does not select self-hosted mode or remove plan
 | `APP_URL` | Your public URL (e.g. `https://signage.yourcompany.com`) |
 
 The default plans are Free (2 devices), Starter (8 devices), Pro (25 devices), and Enterprise
-(unlimited). Edit the `plans` table to change pricing, limits, or tiers. In self-hosted mode,
-new accounts get Enterprise by default; `SELF_HOSTED_SIGNUP_PLAN=trial` changes the policy
-for accounts created after the first one.
+(unlimited). Edit the `plans` table to change pricing, limits, or tiers.
 
 #### Plans and comped accounts
 
@@ -892,7 +875,7 @@ rotation and ban configuration. Docker logs use the container logging configurat
 
 #### Reverse proxy or Cloudflare Tunnel
 
-Use the reviewed [Nginx](scripts/logging/examples/nginx.conf) or
+Use the [Nginx](scripts/logging/examples/nginx.conf) or
 [Caddy](scripts/logging/examples/Caddyfile) example for a public proxy. For a dashboard-managed
 Cloudflare Tunnel, the connector can reach the app directly; a local proxy is optional.
 Follow the [deployment choices](docs/operations.md#fail2ban-examples-nginx-caddy-and-cloudflare-tunnel)
@@ -967,8 +950,7 @@ Your database, uploads, and configuration are preserved — only code files are 
 By default, the database is at `server/db/remote_display.db`, media is in `server/uploads/`,
 and the generated JWT secret is in `server/certs/.jwt_secret`. `DATA_DIR` or individual path
 settings can relocate these; Docker stores them under `/data` in its persistent volume.
-Preserve the secret and your service configuration in a protected backup: the database and
-media alone cannot recover encrypted credentials. For a one-off DB snapshot (safe while running):
+Include the secret and service configuration in backups. For a DB snapshot while the server runs:
 
 ```bash
 sqlite3 server/db/remote_display.db ".backup /path/to/backup.db"

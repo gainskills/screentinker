@@ -9,7 +9,8 @@ backend = auto
 usedns = no
 # Default app HTTP listener. Match these to the ports actually exposed publicly.
 # App TLS enabled: port = 3001,3443 (HTTP redirect + HTTPS), or your custom ports.
-# Public nginx/Caddy: port = 80,443; Caddy HTTP/3 also needs protocol = tcp,udp.
+# Public nginx/Caddy: use the proxy's listening ports (see docs/operations.md).
+# Caddy HTTP/3 also needs protocol = tcp,udp.
 port = 3001
 protocol = tcp
 findtime = 10m

@@ -171,10 +171,9 @@ on the **host**, and see the inode warning below.
 
 ## Server logs and fail2ban
 
-The server writes authentication-failure events and optional HTTP access records to its own stdout
-(the application console, not the browser console). Systemd saves stdout and stderr to
-`/var/log/screentinker/server.log` in the supplied native service configurations. The application
-does not open a log file or require permission to write `/var/log` itself.
+The supplied systemd units save application logs to `/var/log/screentinker/server.log`.
+HTTP access logging is off by default; set `ACCESS_LOG=true` to enable it. Password/TOTP failure
+events remain enabled and can feed Fail2ban.
 
 ### Records
 
@@ -183,29 +182,22 @@ does not open a log file or require permission to write `/var/log` itself.
 2026-10-15T12:00:00.001Z [security] auth_failure ip=203.0.113.10 method=password
 ```
 
-Access records are emitted once when an HTTP response completes or the connection closes. They
-include anonymous requests, parser errors, static files and rate-limit rejections. A disconnected
-request is recorded with `aborted:true` and synthetic status 499. Socket.IO/WebSocket messages and
-the separate HTTP-to-HTTPS redirect listener are not access-logged by Express middleware.
+**Access records** cover completed HTTP responses and closed connections, including anonymous
+requests, static responses, parser errors and rate-limit rejections. Disconnections use
+`aborted:true` and status 499. WebSocket messages and the separate HTTP-to-HTTPS redirect
+listener are excluded.
 
-`route` is the Express route's declared template (relative to its router), not the requested URL.
-It is `-` when no route template is available, such as a static response or an early rejection.
-Query strings, raw paths, bodies, cookies, Authorization headers, account names and user agents
-are omitted. Paths can carry credentials too: inbound hooks, preview sessions and shared views
-all have secrets in their URLs. This privacy choice also means unknown scanner paths are not
-retained in these application access records.
+`route` contains a route template, relative to its router, or `-` for static responses and
+requests rejected before routing. Raw URLs, query strings, bodies, credentials and account names
+are omitted, so these records cannot identify individual scanner paths.
 
-Access records are disabled by default. Set `ACCESS_LOG=true` in the service's environment
-to enable them; unset it or set `ACCESS_LOG=false` to disable them.
-Individual password/TOTP failure events remain enabled. Unknown accounts, wrong passwords and
-attempts during password lockout produce password events; bad TOTP/recovery codes produce TOTP
-events. SSO-policy refusals, successful logins, malformed requests and generic 401/429 responses
-do not count as credential failures. SQLite activity auditing continues independently.
+**Security events** count unknown accounts, wrong passwords, password attempts during lockout,
+and invalid TOTP/recovery codes. Successful logins, SSO-policy refusals and generic 401/429
+responses do not count. Database activity auditing is separate.
 
-The `ip` uses the existing client-IP resolver and normalizes IPv4-mapped addresses. Invalid
-addresses cannot become security events. Console diagnostics escape control characters,
-including newlines, so an untrusted error cannot forge another security record in the shared file.
-Multiline diagnostics and stack traces therefore contain literal `\n` escapes.
+Both records use the resolved visitor IP, with IPv4-mapped addresses normalized. Invalid IPs
+are excluded from security events. Diagnostic messages escape newlines as literal `\n`, keeping
+untrusted text from creating forged log entries.
 
 ### Native systemd setup
 
@@ -233,31 +225,23 @@ sudo systemctl restart screentinker
 sudo tail -F /var/log/screentinker/server.log
 ```
 
-Systemd creates the restricted log directory for the service user. Use separate directories and
-rotation policies if running multiple instances. These settings require systemd with `append:`
-support (v240+). The previous `StandardOutput=journal` and `StandardError=journal` already collected
-application stdout/stderr, readable with `journalctl -u SERVICE`. The settings above redirect
-those messages to the file; service lifecycle events remain in the journal. This changes the
-log destination rather than making previously hidden logs visible. Journald persistence depends
-on its storage configuration. Fail2ban also supports `backend=systemd` with a service-specific
-`journalmatch` instead of `logpath`, so file redirection is optional; the supplied jails use files. The sample service's user, Node executable and checkout path must match
-your installation.
+These settings require systemd 240+ and create a restricted log directory for the service.
+Use separate log paths and rotation policies for multiple instances.
 
-Rotation is daily or above 50 MiB when logrotate runs, retaining 14 files with compression.
-`maxsize` is checked when logrotate runs, not continuously; schedule logrotate more frequently
-for high traffic. `copytruncate` keeps systemd's open descriptor valid without restarting the
-server, with a small possible loss window during copying/truncation. This is an operational log,
-not a guaranteed-delivery audit sink. Check rotation with:
+Services using `StandardOutput=journal` already collect application output in journald
+(`journalctl -u SERVICE`). The drop-in moves that output to the file; service lifecycle events
+stay in the journal. You can keep journald and configure Fail2ban with `backend=systemd` and a
+service-specific `journalmatch`; the supplied jail uses a file instead.
 
-```bash
-sudo logrotate --debug /etc/logrotate.d/screentinker
-```
+The rotation policy keeps 14 compressed files, rotating daily or above 50 MiB when logrotate
+runs. For high traffic, run logrotate more frequently: the size limit is checked on each run.
+`copytruncate` allows rotation without restarting the server, with a small possible loss window.
 
 ### Fail2ban
 
 Fail2ban reads `[security] auth_failure` events from `/var/log/screentinker/server.log` and
-bans repeat offenders. These events remain enabled when HTTP access logging is off.
-Use this filter rather than general 401/429 responses, which also occur during normal use.
+bans repeat offenders. General 401/429 responses also occur during normal use and are excluded
+from this filter.
 
 From the repository root, install the shared filter and jail:
 
@@ -422,9 +406,8 @@ sudo fail2ban-client set screentinker unbanip TEST_SOURCE_IP
 
 ### Docker and other process managers
 
-Configure log collection and retention through the process manager; the app has no `LOG_FILE`
-option. Docker collects console output (`docker compose logs`), independently of the native
-systemd file settings. Point Fail2ban at the collected source. The supplied filter expects plain
+Configure log collection and retention through the process manager. Docker collects console
+output through `docker logs` or `docker compose logs`, independently of the systemd settings. Point Fail2ban at the collected source. The supplied filter expects plain
 application lines; Docker JSON wrappers require extraction or an adapted filter.
 
 ---
@@ -481,10 +464,14 @@ curl -s http://127.0.0.1:3001/api/status      # health, loop lag, connected disp
 Then, and this is the part people skip:
 
 - **Row counts match** what you recorded beforehand.
-- **The log is clean.** Migrations reported, no errors:
+- **The application log is clean.** Check migration output and startup errors at the configured
+  destination. Supplied native services write to `/var/log/screentinker/server.log`:
   ```bash
-  docker logs <container> 2>&1 | grep -iE 'migrat|error|exception'   # or journalctl -u <service>
+  sudo tail -n 200 /var/log/screentinker/server.log
   ```
+  For Docker Compose, use `docker compose logs --tail=200 screentinker`. For a standalone
+  container, use `docker logs --tail=200 CONTAINER` with its name or ID. Native services that
+  retain `StandardOutput=journal` use `journalctl -u SERVICE` instead.
 - **Check through your reverse proxy / CDN too**, not only on loopback. Cached or misrouted assets
   only show up from outside.
 

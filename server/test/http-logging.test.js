@@ -5,6 +5,18 @@ const assert = require('node:assert/strict');
 const { EventEmitter } = require('node:events');
 const { accessLogger, authenticationFailure, installConsoleSafety } = require('../lib/http-logging');
 
+test('access logger accepts omitted options and resolves the socket IP without a resolver', () => {
+  assert.equal(typeof accessLogger(), 'function');
+  const lines = [];
+  const req = { method: 'GET', socket: { remoteAddress: '::ffff:203.0.113.7' } };
+  const res = new EventEmitter();
+  res.statusCode = 200;
+  res.writableFinished = true;
+  accessLogger({ write: line => lines.push(line) })(req, res, () => {});
+  res.emit('finish');
+  assert.equal(JSON.parse(lines[0].split(' [access] ')[1]).ip, '203.0.113.7');
+});
+
 test('access logging records completion once, including anonymous failures, without credentials', () => {
   const lines = [];
   const req = {
