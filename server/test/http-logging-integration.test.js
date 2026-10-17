@@ -9,15 +9,17 @@ const path = require('node:path');
 const { freePort } = require('./helpers/free-port');
 
 test('server console records real authentication failures independently of access logging', { timeout: 60000 }, async t => {
-  for (const enabled of [true, false]) {
-    await t.test(`ACCESS_LOG=${enabled}`, async t => {
+  for (const enabled of [true, false, undefined]) {
+    await t.test(`ACCESS_LOG=${enabled === undefined ? 'unset' : enabled}`, async t => {
       const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'st-http-log-'));
       const port = await freePort();
       const log = path.join(dir, 'server.log');
       const fd = fs.openSync(log, 'w');
+      const env = { ...process.env };
+      delete env.ACCESS_LOG;
       const proc = spawn(process.execPath, ['server.js'], {
         cwd: path.resolve(__dirname, '..'),
-        env: { ...process.env, PORT: String(port), DATA_DIR: dir, NODE_ENV: 'test', SELF_HOSTED: 'true', ACCESS_LOG: String(enabled), ST_SKIP_DEP_PREFLIGHT: '1', OIDC_PROVIDERS: 'logging-test', OIDC_LOGGING_TEST_ISSUER: 'https://idp.example.test', OIDC_LOGGING_TEST_CLIENT_ID: 'logging-test' },
+        env: { ...env, PORT: String(port), DATA_DIR: dir, NODE_ENV: 'test', SELF_HOSTED: 'true', ...(enabled === undefined ? {} : { ACCESS_LOG: String(enabled) }), ST_SKIP_DEP_PREFLIGHT: '1', OIDC_PROVIDERS: 'logging-test', OIDC_LOGGING_TEST_ISSUER: 'https://idp.example.test', OIDC_LOGGING_TEST_CLIENT_ID: 'logging-test' },
         stdio: ['ignore', fd, fd],
       });
       fs.closeSync(fd);
@@ -42,7 +44,8 @@ test('server console records real authentication failures independently of acces
       const post = async (url, body, ip) => {
         const response = await fetch(base + url, {
           method: 'POST',
-          headers: { 'Content-Type': 'application/json', 'X-Forwarded-For': ip, 'CF-Connecting-IP': '203.0.113.99' },
+          // Cloudflare appends the visitor address after any caller-supplied XFF.
+          headers: { 'Content-Type': 'application/json', 'X-Forwarded-For': `203.0.113.99, ${ip}`, 'CF-Connecting-IP': '203.0.113.99' },
           body: JSON.stringify(body),
         });
         await response.text();

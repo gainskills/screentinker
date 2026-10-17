@@ -5,6 +5,7 @@ const net = require('node:net');
 const { format } = require('node:util');
 const SAFE_CONSOLE = Symbol.for('screentinker.safe-console');
 const writeStdout = line => process.stdout.write(line);
+const AUTH_METHOD = Object.freeze({ PASSWORD: 'password', TOTP: 'totp' });
 
 function clientAddress(value) {
   if (typeof value !== 'string') return null;
@@ -42,7 +43,7 @@ function installConsoleSafety(target = console) {
 
 function authenticationFailure(ip, method, { write = writeStdout } = {}) {
   const address = clientAddress(ip);
-  if (!address || !['password', 'totp'].includes(method)) return;
+  if (!address || !Object.values(AUTH_METHOD).includes(method)) return;
   try {
     write(`${new Date().toISOString()} [security] auth_failure ip=${address} method=${method}\n`);
   } catch (_) { /* observability must not change the authentication outcome */ }
@@ -78,4 +79,4 @@ function accessLogger({ getClientIp, write = writeStdout }) {
   };
 }
 
-module.exports = { accessLogger, authenticationFailure, installConsoleSafety };
+module.exports = { accessLogger, authenticationFailure, installConsoleSafety, AUTH_METHOD };
