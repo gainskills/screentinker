@@ -1,0 +1,13 @@
+# Alternative to the base jail: native app, public nginx/Caddy, same host as fail2ban.
+# Install as /etc/fail2ban/jail.d/screentinker.local. Enable after testing.
+[screentinker]
+enabled = false
+filter = screentinker
+logpath = /var/log/screentinker/server.log
+backend = auto
+usedns = no
+findtime = 10m
+maxretry = 10
+bantime = 15m
+# UDP covers Caddy HTTP/3 as well as TCP HTTP/HTTPS.
+action = nftables[type=multiport, name=screentinker, port="80,443", protocol="tcp,udp"]

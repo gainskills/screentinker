@@ -1,0 +1,13 @@
+# Install as /etc/fail2ban/jail.d/screentinker.local; select/test the enforcement
+# action for your firewall/proxy topology before changing enabled to true.
+# Nginx/Caddy/Cloudflare Tunnel variants: examples/ and docs/logging-proxies.md.
+[screentinker]
+enabled = false
+filter = screentinker
+logpath = /var/log/screentinker/server.log
+backend = auto
+usedns = no
+port = http,https,3001,3443
+findtime = 10m
+maxretry = 10
+bantime = 15m

@@ -6,6 +6,7 @@ const { db } = require('../db/database');
 const { generateToken, generateMfaPendingToken, verifyMfaPendingToken, requireAuth, requireAdmin, requireSuperAdmin, isPlatformRole, isPlatformStaff, PLATFORM_ROLES } = require('../middleware/auth');
 const { resolveTenancy } = require('../lib/tenancy');
 const { logActivity, getClientIp } = require('../services/activity');
+const { authenticationFailure } = require('../lib/http-logging');
 const totp = require('../lib/totp');
 const totpLockout = require('../lib/totp-lockout');
 const loginLockout = require('../lib/login-lockout');
@@ -65,6 +66,11 @@ function ensureDefaultOrgForUser(user, { allowCreate = true } = {}) {
 }
 
 function logFailedLogin(email, ip, reason) {
+  // Policy refusals (SSO required) are not bad credentials and must not trigger bans.
+  if (reason === 'Bad TOTP/recovery code') authenticationFailure(ip, 'totp');
+  else if (['User not found', 'Wrong password', 'Locked out (too many failed passwords)'].includes(reason)) {
+    authenticationFailure(ip, 'password');
+  }
   try {
     db.prepare('INSERT INTO activity_log (user_id, action, details, ip_address) VALUES (NULL, ?, ?, ?)')
       .run('auth:login_failed', `${email} - ${reason}`, ip);

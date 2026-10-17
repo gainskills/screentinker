@@ -16,6 +16,7 @@ did not behave.
 - [Before you deploy](#before-you-deploy)
 - [Deploying: native (git + systemd)](#deploying-native-git--systemd)
 - [Deploying: Docker](#deploying-docker)
+- [Server logs and fail2ban](logging.md)
 - [The served APK](#the-served-apk)
 - [Verifying a deploy](#verifying-a-deploy)
 - [Rolling back](#rolling-back)

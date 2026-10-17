@@ -1,0 +1,12 @@
+# Alternative to the base jail: Cloudflare Tunnel or orange-cloud proxied DNS.
+# Install as /etc/fail2ban/jail.d/screentinker.local. Enable after testing.
+[screentinker]
+enabled = false
+filter = screentinker
+logpath = /var/log/screentinker/server.log
+backend = auto
+usedns = no
+findtime = 10m
+maxretry = 10
+bantime = 15m
+action = screentinker-cloudflare

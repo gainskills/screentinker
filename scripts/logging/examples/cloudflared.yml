@@ -1,0 +1,11 @@
+# Locally managed named tunnel. Replace the UUID, credentials path and hostname.
+# Choose ONE of nginx-tunnel.conf or Caddyfile-tunnel on the same host.
+tunnel: REPLACE_WITH_TUNNEL_UUID
+credentials-file: /etc/cloudflared/REPLACE_WITH_TUNNEL_UUID.json
+
+ingress:
+  - hostname: signage.example.com
+    service: http://127.0.0.1:8080
+    originRequest:
+      httpHostHeader: signage.example.com
+  - service: http_status:404

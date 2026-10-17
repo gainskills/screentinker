@@ -804,6 +804,12 @@ Restart=always
 Environment=PORT=3001
 Environment=NODE_ENV=production
 Environment=SELF_HOSTED=true
+# Save the application console to a file; install the rotation policy below.
+LogsDirectory=screentinker
+LogsDirectoryMode=0750
+UMask=0027
+StandardOutput=append:/var/log/screentinker/server.log
+StandardError=inherit
 # Lock down an internal / provisioned-only instance (all accounts created by your
 # team). DISABLE_REGISTRATION closes self-service signup — first-user setup on an
 # empty DB is still allowed, and the login page hides its "Create account" button
@@ -825,8 +831,14 @@ Environment=SELF_HOSTED=true
 WantedBy=multi-user.target
 EOF
 
+sudo install -m 0644 /opt/screentinker/scripts/logging/screentinker.logrotate /etc/logrotate.d/screentinker
+sudo systemctl daemon-reload
 sudo systemctl enable --now screentinker
 ```
+
+Install `logrotate` to rotate `/var/log/screentinker/server.log`. Existing services need the logging
+settings above applied and a restart. See [logging and fail2ban](docs/logging.md) for the event
+format, existing-service setup, and the supplied fail2ban filter.
 
 #### Nginx Example
 

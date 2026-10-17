@@ -1,0 +1,7 @@
+# Public clients connect directly to Caddy; no CDN/tunnel is in front.
+signage.example.com {
+    reverse_proxy 127.0.0.1:3001 {
+        header_up X-Forwarded-For {remote_host}
+        header_up -CF-Connecting-IP
+    }
+}
