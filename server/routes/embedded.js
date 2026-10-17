@@ -34,13 +34,14 @@
 const express = require('express');
 const router  = express.Router();
 const crypto  = require('crypto');
+const fs      = require('fs');
 
 const { db, pruneTelemetry }  = require('../db/database');
 const { deviceTokenAuth }   = require('../middleware/deviceTokenAuth');
 const { bearerAuth }        = require('../middleware/apiToken');
 const { resolveTenancy }    = require('../lib/tenancy');
 const { resolveDevicePlaylist, resolvedLayoutId, resolveDeviceContext } = require('../lib/resolve-device-playlist');
-const { parseProfile, listPresets } = require('../lib/embedded-profiles');
+const { parseProfile, listPresets, getPreset, frameDimensions, frameOrientation } = require('../lib/embedded-profiles');
 const { cacheKey, toETag, isNotModified, get: cacheGet, set: cacheSet } = require('../lib/embedded-cache');
 const { render, renderLayout, isLayoutImageOnly, isBrowserAvailable, looksLikeImage } = require('../lib/embedded-render');
 const { postprocess }       = require('../lib/embedded-postprocess');
@@ -50,16 +51,148 @@ const ScheduleEval          = require('../lib/schedule-eval');
 const PlayOrder             = require('../lib/play-order');
 const { effectiveDeviceTz } = require('../lib/device-timezone');
 const PowerWindow           = require('../lib/power-window');
+const { firmwareLimiter, deviceLogsLimiter } = require('../lib/embedded-rate-limits');
 const { powerScheduleForDevice } = require('../lib/device-power-schedule');
-const { popPendingCommands }     = require('../lib/command-queue');
+const { popPendingCommands, peekPendingCommands, popCommand } = require('../lib/command-queue');
+const otaBreaker            = require('../lib/ota-breaker');
 
-function getPendingCommand(deviceId) {
+const { SHA256_HEX, normalizePresetName, getFirmwareInfo, boardFrom, boardFromRequest, checkOffer } = require('../lib/embedded-firmware');
+
+/*
+ * The `update <url> <sha256>` string for one queued update, or null when the device must not be
+ * told to update. The device verifies the image against the digest in this string and refuses to
+ * flash without one.
+ *
+ * ⚠️ ONLY EVER THIS SERVER'S OWN BINARY. The URL is always /api/embedded/firmware/<preset>/latest.bin
+ * for the preset the panel is filed under, and the digest is the SHA-256 of that file. Anything the
+ * caller put in the queued payload (url, binary_url, sha256, version) is ignored: a command payload
+ * is operator- or API-supplied, and "flash whatever this URL serves, here is its hash" is remote
+ * code execution on the panel with an integrity check the attacker wrote. The firmware's own
+ * digest check cannot help when the digest arrived in the same message as the URL.
+ *
+ * An offer also needs a target version (version.json) so the breaker can judge it, and when
+ * version.json declares a sha256 it must match the bytes on disk — a half-copied binary is not
+ * offered.
+ */
+function buildUpdateOffer(deviceId, device, req, update) {
+  const payload = (update && update.payload) || {};
+  if (payload.url || payload.binary_url || (update && update.url)) {
+    console.warn(`[ota] Device '${deviceId}': ignoring a caller-supplied firmware URL; only this server's own binary is offered`);
+  }
+  const preset = normalizePresetName(device?.screen_profile);
+  if (!preset) return null;
+  // Board check (lib/embedded-firmware.js): a panel that states what it is, now or at pairing, is
+  // offered only its own board's firmware. One that states nothing (v1.3.0) is offered the firmware
+  // for its screen profile, which is what the operator was told when they queued it.
+  const board = boardFromRequest(req) || boardFrom(device?.reported_board);
+  if (board && board.toLowerCase() !== preset.toLowerCase()) {
+    console.warn(`[ota] Device '${deviceId}' reports board '${board}' but is filed as '${preset}'; update not offered`);
+    return null;
+  }
+  const fw = getFirmwareInfo(preset);
+  if (!fw || !fw.sha256) return null;                 // no file on disk: nothing we can offer
+  if (fw.declaredSha256 && fw.declaredSha256.toLowerCase() !== fw.sha256.toLowerCase()) {
+    console.warn(`[ota] Firmware for '${preset}' does not match its version.json sha256; not offered`);
+    return null;
+  }
+  const url = `/api/embedded/firmware/${preset}/latest.bin`;
+  const sha = fw.sha256;
+  const targetVersion = fw.version;
+
+  if (!SHA256_HEX.test(String(sha))) return null;      // no verifiable digest: do not emit
+  if (!targetVersion) return null;                      // no version.json: breaker cannot judge it
+
+  // OTA breaker (RF-6 / S3). Consulted for every offer; not forgiven here. Forgiveness belongs to
+  // an authenticated device reconnect (deviceSocket), not to each poll.
+  const currentVersion = (req && req.headers ? (req.headers['x-st-firmware-version'] || req.headers['x-st-version']) : null)
+    || device?.app_version || '1.0.0';
+  const verdict = otaBreaker.decide(currentVersion, targetVersion, deviceId);
+  if (!verdict.update_available) {
+    console.log(`[ota] Device '${deviceId}' update held off by ota-breaker: reason=${verdict.reason}`);
+    return null;
+  }
+  return `update ${url} ${sha}`;
+}
+
+/*
+ * ⚠️ EVERY X-ST-Command VALUE IS CHECKED BEFORE IT IS SENT. A value Node refuses as a header
+ * (CR/LF, other control characters, anything outside printable ASCII) throws inside res.set(), and
+ * because the command is only popped once the response is written, it stayed queued and threw again
+ * on every poll: one bad command wedged the panel until the queue TTL ran out. An unsendable or
+ * oversized command is popped and logged here, and the next one in line is considered instead.
+ */
+const MAX_COMMAND_LENGTH = 512;   // `update <path> <64 hex>` is ~130; nothing legitimate comes near it
+const SENDABLE_COMMAND = /^[\x21-\x7E][\x20-\x7E]*$/;
+function isSendableCommand(str) {
+  return typeof str === 'string' && str.length <= MAX_COMMAND_LENGTH && SENDABLE_COMMAND.test(str);
+}
+
+function commandStringFor(deviceId, device, req, cmd) {
+  if (cmd.type === 'upload_logs') return 'upload_logs';
+  if (cmd.type === 'update') return buildUpdateOffer(deviceId, device, req, cmd);
+  return typeof cmd.type === 'string' ? cmd.type : null;
+}
+
+/*
+ * The command to deliver on this response, or null. The one chosen is NOT popped here: the caller
+ * pops it with markCommandDelivered() when the response carrying the X-ST-Command header is
+ * written. Anything that cannot be sent (an update the breaker or the firmware check holds, a value
+ * that is not a valid header) IS popped here, so it never sits in the queue re-failing.
+ *
+ * Order: upload_logs, then update, then reboot, then the rest first-in first-out.
+ */
+function resolvePendingCommand(deviceId, device, req) {
   if (!deviceId) return null;
-  const cmds = popPendingCommands(deviceId);
+  const cmds = peekPendingCommands(deviceId);
   if (!cmds || cmds.length === 0) return null;
-  const reboot = cmds.find(c => c.type === 'reboot');
-  if (reboot) return 'reboot';
-  return cmds[0].type;
+
+  const rank = (c) => (c.type === 'upload_logs' ? 0 : c.type === 'update' ? 1 : c.type === 'reboot' ? 2 : 3);
+  const ordered = cmds.map((c, i) => ({ c, i })).sort((a, b) => rank(a.c) - rank(b.c) || a.i - b.i).map((x) => x.c);
+
+  for (const cmd of ordered) {
+    let commandStr = null;
+    try {
+      commandStr = commandStringFor(deviceId, device, req, cmd);
+    } catch (e) {
+      console.warn(`[embedded] Device '${deviceId}': could not build queued '${String(cmd.type).slice(0, 40)}': ${e.message}`);
+    }
+    if (commandStr !== null && isSendableCommand(commandStr)) {
+      return { type: cmd.type, commandStr };
+    }
+    // An update the breaker or the firmware check held is expected and already logged. Anything
+    // else here is a command no panel could be sent.
+    if (commandStr !== null || cmd.type !== 'update') {
+      console.warn(`[embedded] Device '${deviceId}': dropped an unsendable queued command (${JSON.stringify(String(cmd.type)).slice(0, 60)}, ${String(commandStr ?? cmd.type).length} chars)`);
+    }
+    if (cmd.type !== undefined && cmd.type !== null) popCommand(deviceId, cmd.type);
+  }
+  return null;
+}
+
+/*
+ * Run a render handler that may carry a queued command. If it throws (res.set() on a bad header,
+ * anything else), the command it carried is dropped and logged rather than left to fail again on
+ * every poll.
+ */
+async function withCommandDropOnThrow(deviceId, pendingCmdObj, run) {
+  try {
+    return await run();
+  } catch (e) {
+    if (pendingCmdObj && pendingCmdObj.type !== undefined) {
+      popCommand(deviceId, pendingCmdObj.type);
+      console.warn(`[embedded] Device '${deviceId}': dropped queued '${String(pendingCmdObj.type).slice(0, 40)}' after the response carrying it failed: ${e.message}`);
+    }
+    throw e;
+  }
+}
+
+function getPendingCommand(deviceId, device, req, options = {}) {
+  const resolved = resolvePendingCommand(deviceId, device, req);
+  if (!resolved) return null;
+  if (!options.peek) {
+    popCommand(deviceId, resolved.type);
+  }
+  return resolved.commandStr;
 }
 
 // ─── Auth helper ───────────────────────────────────────────────────────────────
@@ -82,10 +215,14 @@ function resolveAuth(req, res, next) {
     return bearerAuth(req, res, (err) => {
       if (err) return next(err);
       // This router was mounted outside the PUBLIC_ROUTERS bearerAuth+tokenScopeGate loop (it also
-      // takes device tokens), so it never applied a scope gate. Every route here is a device-content
-      // READ, so only read-ladder tokens (read/write/full) qualify. 'agency' (publish to designated
-      // playlists) and 'billing:read' (global billing read) are off-ladder narrow grants and must not
-      // be able to read arbitrary device renders in their bound workspace.
+      // takes device tokens), so it never applied a scope gate. What an API token may do here is
+      // READ device content, so only read-ladder tokens (read/write/full) qualify. 'agency' (publish
+      // to designated playlists) and 'billing:read' (global billing read) are off-ladder narrow grants
+      // and must not be able to read arbitrary device renders in their bound workspace.
+      //
+      // ⚠️ The routes that WRITE what a panel reports about itself — POST /logs, and the orientation
+      // touchDeviceHeartbeat remembers — are the device's alone and check req.device (the device-token
+      // path) themselves. A token reading a render is a dashboard looking, not the panel speaking.
       const READ_LADDER = new Set(['read', 'write', 'full']);
       if (req.viaToken && !READ_LADDER.has(req.tokenScope)) {
         return res.status(403).json({ error: `API token scope '${req.tokenScope}' cannot read device content` });
@@ -106,9 +243,9 @@ function resolveAuth(req, res, next) {
 function resolveDevice(req, res) {
   if (req.device) return req.device;
 
-  const deviceId = req.query.device_id;
+  const deviceId = req.query.device_id || req.headers['x-st-device-id'] || (req.body && req.body.device_id);
   if (!deviceId) {
-    res.status(400).json({ error: 'device_id query parameter required' });
+    res.status(400).json({ error: 'device_id parameter required' });
     return null;
   }
 
@@ -131,6 +268,33 @@ function resolveDevice(req, res) {
  */
 const HEARTBEAT_DONE = Symbol('embeddedHeartbeat');
 
+/*
+ * ⚠️ NOT lib/device-command.deliverCommand — that one SENDS a command to a screen. This one only
+ * records that a polled response carried it, so the queue can drop it.
+ *
+ * Pop the queued command at the moment a response carrying its X-ST-Command header is written.
+ * Every status, including 304 and 404/501 that carry the header. A 304 that carries it has been
+ * delivered, so leaving it queued would re-run update / reboot / upload_logs on every unchanged poll.
+ */
+function markCommandDelivered(deviceId, opts) {
+  if (opts && opts.pendingCmdObj) popCommand(deviceId, opts.pendingCmdObj.type);
+}
+
+/*
+ * Whole seconds until the next scheduled-off edge, or Infinity when there is none.
+ *
+ * nextEdge.minutes_until counts whole minutes from the current minute, so using it directly rounds
+ * a panel 10 s from power-off up to a full minute. Take the sub-minute remainder from the clock.
+ * Floored so the answer never runs past the real edge.
+ */
+function secondsUntilOffEdge(power, nowMs = Date.now()) {
+  if (!power || !power.nextEdge || power.nextEdge.to !== 'scheduled_off') return Infinity;
+  const minutes = Number(power.nextEdge.minutes_until);
+  if (!Number.isFinite(minutes) || minutes < 1) return 1;
+  const intoMinute = (nowMs % 60000) / 1000;
+  return Math.max(1, Math.floor(minutes * 60 - intoMinute));
+}
+
 function touchDeviceHeartbeat(device, req) {
   if (req[HEARTBEAT_DONE] !== undefined) return req[HEARTBEAT_DONE];
   const clientIp = (req.headers['x-forwarded-for'] || req.socket?.remoteAddress || req.ip || '').replace(/^::ffff:/, '');
@@ -143,6 +307,8 @@ function touchDeviceHeartbeat(device, req) {
   const fwHeader          = req.headers['x-st-firmware-version'] || req.headers['x-st-app-version'] || req.headers['x-st-version'];
   const powerSourceHeader = req.headers['x-st-power-source'];
   const chargingHeader    = req.headers['x-st-charging'] || req.headers['x-st-battery-charging'];
+  const tempHeader        = req.headers['x-st-device-temperature'] || req.headers['x-st-temperature'];
+  const humidityHeader    = req.headers['x-st-device-humidity']    || req.headers['x-st-humidity'];
 
   let batteryLevel = null;
   if (batteryHeader !== undefined) {
@@ -182,8 +348,50 @@ function touchDeviceHeartbeat(device, req) {
     batteryCharging = (chargingHeader === '1' || chargingHeader === 'true') ? 1 : 0;
   }
 
+  let temperatureC = null;
+  if (tempHeader !== undefined) {
+    const parsed = parseFloat(tempHeader);
+    if (Number.isFinite(parsed) && parsed >= -40 && parsed <= 85) {
+      temperatureC = Math.round(parsed * 10) / 10;
+    }
+  }
+
+  let humidity = null;
+  if (humidityHeader !== undefined) {
+    const parsed = parseFloat(humidityHeader);
+    if (Number.isFinite(parsed) && parsed >= 0 && parsed <= 100) {
+      humidity = Math.round(parsed * 10) / 10;
+    }
+  }
+
   if (powerSource) {
     device.power_source = powerSource;
+  }
+  if (appVersion) {
+    // ⚠️ No separate "progress" call to the OTA breaker: decide() resets its no-progress count by
+    // itself the moment the version it is given differs from the one it held against, and every
+    // offer passes this poll's version. Recording it here as well changed nothing.
+    device.app_version = appVersion;
+  }
+
+  /*
+   * The orientation the PANEL stated on this request, remembered so a later poll (or a dashboard
+   * preview) that states none renders the same way. ⚠️ Only from the device itself: never from a
+   * dashboard preview (an operator looking, not the panel saying where it is mounted) and never
+   * from an API token, which is a reader, not the panel. Stored in reported_orientation, NULL until
+   * a panel says something — devices.orientation is 'landscape' on every row by schema default and
+   * means nothing here.
+   */
+  const stated = statedOrientationRotation(req);
+  const isPreviewReq = req.query?.preview === '1';
+  const persistOrient = (req.device && !isPreviewReq && stated.orientation) ? stated.orientation : null;
+  if (persistOrient) {
+    device.reported_orientation = persistOrient;
+  }
+  // The board, when the firmware states it (X-ST-Preset): device-token path only, like the above.
+  const persistBoard = req.device ? (boardFromRequest(req) || null) : null;
+  if (persistBoard) {
+    device.reported_board = persistBoard;
   }
 
   try {
@@ -194,19 +402,24 @@ function touchDeviceHeartbeat(device, req) {
           ip_address = CASE WHEN ? != '' THEN ? ELSE ip_address END,
           app_version = COALESCE(?, app_version),
           power_source = COALESCE(?, power_source),
+          reported_orientation = COALESCE(?, reported_orientation),
+          reported_board = COALESCE(?, reported_board),
           updated_at = strftime('%s','now')
       WHERE id = ?
-    `).run(clientIp, clientIp, appVersion, powerSource, device.id);
+    `).run(clientIp, clientIp, appVersion, powerSource, persistOrient, persistBoard, device.id);
 
     // If telemetry headers were provided, record a row in device_telemetry.
     // ⚠️ local_ip stays NULL: it means the screen's LAN address (the dashboard prints it as "Local
     // IP"), and all we have here is the address the request came from — the public NAT/proxy one,
     // already kept in devices.ip_address.
-    if (batteryLevel !== null || wifiRssi !== null || powerSource !== null) {
+    if (batteryLevel !== null || wifiRssi !== null || powerSource !== null || temperatureC !== null || humidity !== null) {
+      // ⚠️ No fallback insert and no inner catch: temperature_c / humidity are guaranteed by
+      // schema.sql and the database.js migrations, and a swallowed error here is exactly what hid
+      // the battery_charging constraint failure in 2.6.0 (#583). Failures go to the logged catch below.
       db.prepare(`
-        INSERT INTO device_telemetry (device_id, battery_level, battery_charging, wifi_rssi, local_ip, power_source, reported_at)
-        VALUES (?, ?, ?, ?, NULL, ?, strftime('%s','now'))
-      `).run(device.id, batteryLevel, batteryCharging, wifiRssi, powerSource);
+        INSERT INTO device_telemetry (device_id, battery_level, battery_charging, wifi_rssi, local_ip, power_source, temperature_c, humidity, reported_at)
+        VALUES (?, ?, ?, ?, NULL, ?, ?, ?, strftime('%s','now'))
+      `).run(device.id, batteryLevel, batteryCharging, wifiRssi, powerSource, temperatureC, humidity);
 
       if (typeof pruneTelemetry === 'function') {
         pruneTelemetry(device.id);
@@ -672,9 +885,13 @@ router.post('/pair/register', (req, res) => {
   const id = crypto.randomUUID();
   const newToken = crypto.randomBytes(32).toString('hex');
   const claimSecret = crypto.randomBytes(32).toString('hex');
-  const width = parseInt(screen_width) || 800;
-  const height = parseInt(screen_height) || 480;
+  const parsed = parseProfile(screen_profile || 'seeed-reterminal-sticky');
+  const width = parseInt(screen_width) || parsed?.width || 800;
+  const height = parseInt(screen_height) || parsed?.height || 480;
   const profile = typeof screen_profile === 'object' ? JSON.stringify(screen_profile) : (screen_profile || 'seeed-reterminal-sticky');
+  // What the hardware said it is (screentinker_mcu registers with its compile-time preset). Only a
+  // named preset the device itself sent; the Sticky default above is ours, not the device's.
+  const reportedBoard = (typeof screen_profile === 'string' && getPreset(screen_profile)) ? (boardFrom(screen_profile) || null) : null;
 
   let code;
   let inserted = false;
@@ -682,9 +899,9 @@ router.post('/pair/register', (req, res) => {
     code = sixDigitCode(); // CSPRNG (lib/numeric-code): server generates code, caller cannot choose
     try {
       db.prepare(`
-        INSERT INTO devices (id, pairing_code, device_token, claim_secret, status, client_type, screen_profile, screen_width, screen_height, render_width, render_height, last_heartbeat)
-        VALUES (?, ?, ?, ?, 'provisioning', 'embedded', ?, ?, ?, ?, ?, strftime('%s','now'))
-      `).run(id, code, newToken, claimSecret, profile, width, height, width, height);
+        INSERT INTO devices (id, pairing_code, device_token, claim_secret, status, client_type, screen_profile, screen_width, screen_height, render_width, render_height, reported_board, last_heartbeat)
+        VALUES (?, ?, ?, ?, 'provisioning', 'embedded', ?, ?, ?, ?, ?, ?, strftime('%s','now'))
+      `).run(id, code, newToken, claimSecret, profile, width, height, width, height, reportedBoard);
       inserted = true;
       break;
     } catch (e) {
@@ -765,6 +982,64 @@ router.get('/pair/status', (req, res) => {
   });
 });
 
+const VALID_ORIENTATIONS = new Set(['landscape', 'portrait', 'landscape-flipped', 'portrait-flipped']);
+const ORIENTATION_FOR_ROTATION = { 0: 'landscape', 90: 'portrait', 180: 'landscape-flipped', 270: 'portrait-flipped' };
+
+/*
+ * The orientation/rotation this REQUEST states (?orientation= / ?rotation= / ?rotate= /
+ * X-ST-Device-Orientation / X-ST-Device-Rotation, and the X-ST-Orientation / X-ST-Rotation
+ * aliases), validated. A rotation alone implies its orientation. Both undefined when none is stated.
+ */
+function statedOrientationRotation(req) {
+  const q = req.query || {};
+  const h = req.headers || {};
+  const norm = (v) => (v === undefined || v === null ? undefined : String(v).trim().toLowerCase());
+  const queryOrient = norm(q.orientation);
+  const headerOrient = norm(h['x-st-device-orientation'] || h['x-st-orientation']);
+  const queryRotRaw = q.rotation !== undefined ? q.rotation : q.rotate;
+  const headerRotRaw = h['x-st-device-rotation'] !== undefined ? h['x-st-device-rotation'] : h['x-st-rotation'];
+  const toRot = (v) => {
+    if (v === undefined) return undefined;
+    const n = parseInt(v, 10);
+    return ORIENTATION_FOR_ROTATION[n] !== undefined ? n : undefined;
+  };
+  let orientation = (VALID_ORIENTATIONS.has(queryOrient) ? queryOrient : undefined)
+    || (VALID_ORIENTATIONS.has(headerOrient) ? headerOrient : undefined);
+  const rotation = toRot(queryRotRaw) !== undefined ? toRot(queryRotRaw) : toRot(headerRotRaw);
+  if (!orientation && rotation !== undefined) orientation = ORIENTATION_FOR_ROTATION[rotation];
+  return { orientation, rotation };
+}
+
+/*
+ * What to render this panel as: what the request states, else what the device itself last
+ * reported (devices.reported_orientation), else nothing — and nothing means the stored profile
+ * exactly as it is, byte-identical to before orientation support. ⚠️ Never devices.orientation.
+ */
+function resolveOrientationRotation(req, device) {
+  const stated = statedOrientationRotation(req);
+  if (stated.orientation || stated.rotation !== undefined) return stated;
+  const reported = device && VALID_ORIENTATIONS.has(device.reported_orientation) ? device.reported_orientation : undefined;
+  return { orientation: reported, rotation: undefined };
+}
+
+/*
+ * ?format= for a preview. A nibble panel's bytes are its controller's own packing; a PNG/JPEG/BMP
+ * request cannot be honoured by handing back nibbles. Refuse it rather than label nibbles as an image.
+ */
+const IMAGE_FORMATS = new Set(['png', 'jpeg', 'jpg', 'bmp']);
+const PACKED_NIBBLE_DEPTHS = new Set(['spectra6', 'gray16']);
+function applyFormatOverride(req, profile) {
+  if (!req.query.format) return null;
+  const fmt = String(req.query.format).toLowerCase();
+  const known = fmt === 'png' || fmt === 'jpeg' || fmt === 'jpg' || fmt === 'bmp' || fmt === 'raw' || fmt === 'x-epd-packed' || fmt === 'x-epd-spectra6' || fmt === 'x-epd-gray16';
+  if (!known) return null;
+  if (PACKED_NIBBLE_DEPTHS.has(profile.colorDepth) && IMAGE_FORMATS.has(fmt)) {
+    return `format=${fmt} is not available for ${profile.colorDepth} panels: the response is packed controller nibbles`;
+  }
+  profile.outputFormat = fmt;
+  return null;
+}
+
 // ─── GET /api/embedded/info ─────────────────────────────────────────────────────
 
 router.get('/info', resolveAuth, (req, res) => {
@@ -772,7 +1047,8 @@ router.get('/info', resolveAuth, (req, res) => {
   if (!device) return;
 
   touchDeviceHeartbeat(device, req);
-  const profile = parseProfile(device.screen_profile);
+  const { orientation: overrideOrientation, rotation: overrideRotation } = resolveOrientationRotation(req, device);
+  const profile = parseProfile(device.screen_profile, { orientation: overrideOrientation, rotation: overrideRotation });
   const power = evaluateDevicePower(device);
   // /info is metadata (MCU negotiation / debugging / monitors). It must NOT advance the panel's
   // cursor, or a poll that lands after the current item's dwell would make the real render skip an item.
@@ -820,7 +1096,8 @@ router.get('/render', resolveAuth, async (req, res) => {
 
   touchDeviceHeartbeat(device, req);
 
-  const profile = parseProfile(device.screen_profile);
+  const { orientation: overrideOrientation, rotation: overrideRotation } = resolveOrientationRotation(req, device);
+  const profile = parseProfile(device.screen_profile, { orientation: overrideOrientation, rotation: overrideRotation });
   if (!profile) {
     return res.status(400).json({
       error: 'Embedded rendering not configured for this device.',
@@ -829,12 +1106,8 @@ router.get('/render', resolveAuth, async (req, res) => {
   }
 
   // Allow optional query overrides (e.g. ?format=jpeg or ?format=png or ?dither=atkinson for previewing)
-  if (req.query.format) {
-    const fmt = String(req.query.format).toLowerCase();
-    if (fmt === 'png' || fmt === 'jpeg' || fmt === 'jpg' || fmt === 'bmp' || fmt === 'raw' || fmt === 'x-epd-packed') {
-      profile.outputFormat = fmt;
-    }
-  }
+  const formatErr = applyFormatOverride(req, profile);
+  if (formatErr) return res.status(400).json({ error: formatErr });
   if (req.query.dither) {
     const d = String(req.query.dither).toLowerCase();
     if (d === 'floyd-steinberg' || d === 'atkinson' || d === 'none') {
@@ -843,30 +1116,33 @@ router.get('/render', resolveAuth, async (req, res) => {
   }
 
   const isPreview = req.query.preview === '1';
-  const pendingCmd = !isPreview ? getPendingCommand(device.id) : null;
-  const renderOpts = { pendingCmd };
+  const pendingCmdObj = !isPreview ? resolvePendingCommand(device.id, device, req) : null;
+  const pendingCmd = pendingCmdObj ? pendingCmdObj.commandStr : null;
+  const renderOpts = { pendingCmd, pendingCmdObj };
 
-  // Query mode overrides
-  if (req.query.mode === 'single') {
-    return handleRenderStandard(req, res, device, profile, renderOpts);
-  }
-  if (req.query.mode === 'layout') {
-    return handleRenderLayout(req, res, device, profile, { ...renderOpts, explicitMode: true });
-  }
-
-  // Automatic multi-zone layout detection
-  const forceIndex = req.query.item !== undefined ? req.query.item : null;
-  const layoutResolved = resolveLayoutItems(device.id, forceIndex, { advance: false });
-
-  if (layoutResolved && layoutResolved.zoneEntries.length > 1) {
-    const isImageOnly = isLayoutImageOnly(layoutResolved.zoneEntries);
-    if (!isImageOnly && !isBrowserAvailable()) {
-      return handleRenderStandard(req, res, device, profile, { ...renderOpts, isFallback: true });
+  return withCommandDropOnThrow(device.id, pendingCmdObj, () => {
+    // Query mode overrides
+    if (req.query.mode === 'single') {
+      return handleRenderStandard(req, res, device, profile, renderOpts);
     }
-    return handleRenderLayout(req, res, device, profile, { ...renderOpts, explicitMode: false, preResolved: layoutResolved });
-  }
+    if (req.query.mode === 'layout') {
+      return handleRenderLayout(req, res, device, profile, { ...renderOpts, explicitMode: true });
+    }
 
-  return handleRenderStandard(req, res, device, profile, renderOpts);
+    // Automatic multi-zone layout detection
+    const forceIndex = req.query.item !== undefined ? req.query.item : null;
+    const layoutResolved = resolveLayoutItems(device.id, forceIndex, { advance: false });
+
+    if (layoutResolved && layoutResolved.zoneEntries.length > 1) {
+      const isImageOnly = isLayoutImageOnly(layoutResolved.zoneEntries);
+      if (!isImageOnly && !isBrowserAvailable()) {
+        return handleRenderStandard(req, res, device, profile, { ...renderOpts, isFallback: true });
+      }
+      return handleRenderLayout(req, res, device, profile, { ...renderOpts, explicitMode: false, preResolved: layoutResolved });
+    }
+
+    return handleRenderStandard(req, res, device, profile, renderOpts);
+  });
 });
 
 // ─── GET /api/embedded/render-layout ────────────────────────────────────────────
@@ -877,7 +1153,8 @@ router.get('/render-layout', resolveAuth, async (req, res) => {
 
   touchDeviceHeartbeat(device, req);
 
-  const profile = parseProfile(device.screen_profile);
+  const { orientation: overrideOrientation, rotation: overrideRotation } = resolveOrientationRotation(req, device);
+  const profile = parseProfile(device.screen_profile, { orientation: overrideOrientation, rotation: overrideRotation });
   if (!profile) {
     return res.status(400).json({
       error: 'Embedded rendering not configured for this device.',
@@ -885,12 +1162,8 @@ router.get('/render-layout', resolveAuth, async (req, res) => {
     });
   }
 
-  if (req.query.format) {
-    const fmt = String(req.query.format).toLowerCase();
-    if (fmt === 'png' || fmt === 'jpeg' || fmt === 'jpg' || fmt === 'bmp' || fmt === 'raw' || fmt === 'x-epd-packed') {
-      profile.outputFormat = fmt;
-    }
-  }
+  const formatErr = applyFormatOverride(req, profile);
+  if (formatErr) return res.status(400).json({ error: formatErr });
   if (req.query.dither) {
     const d = String(req.query.dither).toLowerCase();
     if (d === 'floyd-steinberg' || d === 'atkinson' || d === 'none') {
@@ -899,8 +1172,10 @@ router.get('/render-layout', resolveAuth, async (req, res) => {
   }
 
   const isPreview = req.query.preview === '1';
-  const pendingCmd = !isPreview ? getPendingCommand(device.id) : null;
-  return handleRenderLayout(req, res, device, profile, { pendingCmd, explicitMode: true });
+  const pendingCmdObj = !isPreview ? resolvePendingCommand(device.id, device, req) : null;
+  const pendingCmd = pendingCmdObj ? pendingCmdObj.commandStr : null;
+  return withCommandDropOnThrow(device.id, pendingCmdObj,
+    () => handleRenderLayout(req, res, device, profile, { pendingCmd, pendingCmdObj, explicitMode: true }));
 });
 
 async function handleRenderStandard(req, res, device, profile, opts = {}) {
@@ -934,6 +1209,7 @@ async function handleRenderStandard(req, res, device, profile, opts = {}) {
     if (opts.pendingCmd) {
       offHeaders['X-ST-Command'] = opts.pendingCmd;
     }
+    markCommandDelivered(device.id, opts);
     res.set(offHeaders).status(304).end();
     return;
   }
@@ -945,6 +1221,7 @@ async function handleRenderStandard(req, res, device, profile, opts = {}) {
     const errHeaders = { 'X-ST-Device-Name': device.name || '' };
     if (opts.pendingCmd) errHeaders['X-ST-Command'] = opts.pendingCmd;
     res.set(errHeaders);
+    markCommandDelivered(device.id, opts);
     return res.status(404).json({ error: 'No playlist assigned or no active items for this device.', device_name: device.name || '' });
   }
 
@@ -953,9 +1230,17 @@ async function handleRenderStandard(req, res, device, profile, opts = {}) {
   let expiresIn = resolved.expiresIn;
   if (power.isOff && power.sleepSeconds) {
     expiresIn = power.sleepSeconds;
-  } else if (!power.isOff && power.nextEdge && power.nextEdge.to === 'scheduled_off') {
-    const secondsUntilOff = Math.max(1, power.nextEdge.minutes_until * 60);
-    expiresIn = Math.min(expiresIn, secondsUntilOff);
+  } else if (!power.isOff) {
+    let secondsUntilOff = Infinity;
+    if (power.nextEdge && power.nextEdge.to === 'scheduled_off') {
+      secondsUntilOff = secondsUntilOffEdge(power);
+      expiresIn = Math.min(expiresIn, secondsUntilOff);
+    }
+    // S4: the floor is a minimum for a panel that stays on. It is capped by the seconds to the next
+    // off edge, so a panel minutes from power-off is never told to wait out the floor.
+    if (profile.minRefreshInterval && typeof profile.minRefreshInterval === 'number') {
+      expiresIn = Math.min(secondsUntilOff, Math.max(expiresIn, profile.minRefreshInterval));
+    }
   }
 
   console.log(`[embedded] Device '${device.name}' (${device.id}) requested frame [item=${itemIndex + 1}/${total}] from ${clientIp}`);
@@ -981,7 +1266,11 @@ async function handleRenderStandard(req, res, device, profile, opts = {}) {
     'X-ST-Item-Index': String(itemIndex),
     'X-ST-Total-Items': String(total),
     'X-ST-Power-State': power.state,
+    ...frameHeaders(profile),
   };
+  if (profile.supportsPartialRefresh !== undefined) {
+    headers['X-ST-Supports-Partial'] = profile.supportsPartialRefresh ? '1' : '0';
+  }
   if (opts.pendingCmd) {
     headers['X-ST-Command'] = opts.pendingCmd;
   }
@@ -990,6 +1279,7 @@ async function handleRenderStandard(req, res, device, profile, opts = {}) {
   }
 
   if (!isPreview && isNotModified(key, req.headers['if-none-match'])) {
+    markCommandDelivered(device.id, opts);
     res.set(headers).status(304).end();
     return;
   }
@@ -998,6 +1288,7 @@ async function handleRenderStandard(req, res, device, profile, opts = {}) {
   if (!isPreview) {
     const cached = cacheGet(key);
     if (cached.hit) {
+      markCommandDelivered(device.id, opts);
       res.set({ ...headers, 'Content-Type': detectContentType(profile) });
       return res.status(200).send(cached.buffer);
     }
@@ -1028,6 +1319,7 @@ async function handleRenderStandard(req, res, device, profile, opts = {}) {
 
   if (!renderResult || renderResult.unsupported) {
     if (opts.pendingCmd) res.set('X-ST-Command', opts.pendingCmd);
+    markCommandDelivered(device.id, opts);
     return res.status(501).json({
       error: 'Content type not yet supported by Phase 1 renderer.',
       detail: renderResult?.reason || 'No renderable items in playlist',
@@ -1040,6 +1332,10 @@ async function handleRenderStandard(req, res, device, profile, opts = {}) {
     processed = await postprocess(renderResult.png, profile);
   } catch (e) {
     console.error('[embedded] postprocess error:', e.message);
+    // Same as every other answer here (and the layout path's 500): a frame we could not build is
+    // no reason to withhold a queued reboot or log upload — it is often exactly when one is needed.
+    if (opts.pendingCmd) res.set('X-ST-Command', opts.pendingCmd);
+    markCommandDelivered(device.id, opts);
     return res.status(500).json({ error: `Post-processing failed: ${e.message}` });
   }
 
@@ -1048,11 +1344,27 @@ async function handleRenderStandard(req, res, device, profile, opts = {}) {
     try { cacheSet(key, processed.buffer); } catch { /* best-effort */ }
   }
 
-  res.set({ ...headers, 'Content-Type': processed.contentType });
+  res.set({
+    ...headers,
+    ...(processed.width && processed.height
+      ? { 'X-ST-Screen-Width': String(processed.width), 'X-ST-Screen-Height': String(processed.height) }
+      : {}),
+    'Content-Type': processed.contentType,
+  });
+  markCommandDelivered(device.id, opts);
   res.status(200).send(processed.buffer);
 }
 
 async function handleRenderLayout(req, res, device, profile, opts = {}) {
+  const isPreview = req.query.preview === '1' || opts.preview === true;
+  const pendingCmdObj = opts.pendingCmdObj !== undefined
+    ? opts.pendingCmdObj
+    : (!isPreview ? resolvePendingCommand(device.id, device, req) : null);
+  const pendingCmd = opts.pendingCmd !== undefined
+    ? opts.pendingCmd
+    : (pendingCmdObj ? pendingCmdObj.commandStr : null);
+  const cmdOpts = { ...opts, pendingCmd, pendingCmdObj };
+
   const ac = opts.signal ? null : new AbortController();
   if (ac) {
     res.on('close', () => {
@@ -1067,20 +1379,24 @@ async function handleRenderLayout(req, res, device, profile, opts = {}) {
   const resolved = opts.preResolved || resolveLayoutItems(device.id, forceIndex, { advance: false });
   if (!resolved || resolved.zoneEntries.length === 0) {
     if (isExplicit) {
+      if (cmdOpts.pendingCmd) res.setHeader('X-ST-Command', cmdOpts.pendingCmd);
+      markCommandDelivered(device.id, cmdOpts);
       return res.status(404).json({ error: 'Device has no multi-zone layout assigned or no active items.' });
     }
-    return handleRenderStandard(req, res, device, profile, { ...opts, isFallback: true, signal });
+    return handleRenderStandard(req, res, device, profile, { ...cmdOpts, isFallback: true, signal });
   }
 
   const isImageOnly = isLayoutImageOnly(resolved.zoneEntries);
   if (!isImageOnly && !isBrowserAvailable()) {
     if (isExplicit) {
+      if (cmdOpts.pendingCmd) res.setHeader('X-ST-Command', cmdOpts.pendingCmd);
+      markCommandDelivered(device.id, cmdOpts);
       return res.status(501).json({
         error: 'Multi-zone layout rendering failed or not supported.',
         detail: 'Browser unavailable for multi-zone rendering with widgets or web pages',
       });
     }
-    return handleRenderStandard(req, res, device, profile, { ...opts, isFallback: true, signal });
+    return handleRenderStandard(req, res, device, profile, { ...cmdOpts, isFallback: true, signal });
   }
 
   // Persist pending cursor advances now that the layout is confirmed for rendering
@@ -1089,8 +1405,6 @@ async function handleRenderLayout(req, res, device, profile, opts = {}) {
       ZONE_CURSOR_UPSERT.run(device.id, adv.zoneId, adv.index);
     }
   }
-
-  const isPreview = req.query.preview === '1';
 
   // ── Power Schedule check ──────────────────────────────────────────────────
   const power = (!isPreview && forceIndex === null)
@@ -1107,9 +1421,10 @@ async function handleRenderLayout(req, res, device, profile, opts = {}) {
       'X-ST-Expires-In': String(power.sleepSeconds),
       'X-ST-Power-State': 'scheduled_off',
     };
-    if (opts.pendingCmd) {
-      offHeaders['X-ST-Command'] = opts.pendingCmd;
+    if (cmdOpts.pendingCmd) {
+      offHeaders['X-ST-Command'] = cmdOpts.pendingCmd;
     }
+    markCommandDelivered(device.id, cmdOpts);
     res.set(offHeaders).status(304).end();
     return;
   }
@@ -1119,9 +1434,17 @@ async function handleRenderLayout(req, res, device, profile, opts = {}) {
   let expiresIn = resolved.expiresIn;
   if (power.isOff && power.sleepSeconds) {
     expiresIn = power.sleepSeconds;
-  } else if (!power.isOff && power.nextEdge && power.nextEdge.to === 'scheduled_off') {
-    const secondsUntilOff = Math.max(1, power.nextEdge.minutes_until * 60);
-    expiresIn = Math.min(expiresIn, secondsUntilOff);
+  } else if (!power.isOff) {
+    let secondsUntilOff = Infinity;
+    if (power.nextEdge && power.nextEdge.to === 'scheduled_off') {
+      secondsUntilOff = secondsUntilOffEdge(power);
+      expiresIn = Math.min(expiresIn, secondsUntilOff);
+    }
+    // S4: the floor is a minimum for a panel that stays on. It is capped by the seconds to the next
+    // off edge, so a panel minutes from power-off is never told to wait out the floor.
+    if (profile.minRefreshInterval && typeof profile.minRefreshInterval === 'number') {
+      expiresIn = Math.min(secondsUntilOff, Math.max(expiresIn, profile.minRefreshInterval));
+    }
   }
 
   console.log(`[embedded] Device '${device.name}' (${device.id}) requested multi-zone frame [layout=${layout.name || layout.id}] from ${clientIp}`);
@@ -1144,12 +1467,17 @@ async function handleRenderLayout(req, res, device, profile, opts = {}) {
     'X-ST-Item-Index': '0',
     'X-ST-Total-Zones': String(zoneEntries.length),
     'X-ST-Power-State': power.state,
+    ...frameHeaders(profile),
   };
-  if (opts.pendingCmd) {
-    headers['X-ST-Command'] = opts.pendingCmd;
+  if (profile.supportsPartialRefresh !== undefined) {
+    headers['X-ST-Supports-Partial'] = profile.supportsPartialRefresh ? '1' : '0';
+  }
+  if (cmdOpts.pendingCmd) {
+    headers['X-ST-Command'] = cmdOpts.pendingCmd;
   }
 
   if (!isPreview && isNotModified(key, req.headers['if-none-match'])) {
+    markCommandDelivered(device.id, cmdOpts);
     res.set(headers).status(304).end();
     return;
   }
@@ -1158,6 +1486,7 @@ async function handleRenderLayout(req, res, device, profile, opts = {}) {
   if (!isPreview) {
     const cached = cacheGet(key);
     if (cached.hit) {
+      markCommandDelivered(device.id, cmdOpts);
       res.set({ ...headers, 'Content-Type': detectContentType(profile) });
       return res.status(200).send(cached.buffer);
     }
@@ -1170,23 +1499,27 @@ async function handleRenderLayout(req, res, device, profile, opts = {}) {
   } catch (e) {
     console.error(`[embedded] multi-zone layout render error: ${e.message}`);
     if (isExplicit) {
+      if (cmdOpts.pendingCmd) res.setHeader('X-ST-Command', cmdOpts.pendingCmd);
+      markCommandDelivered(device.id, cmdOpts);
       return res.status(500).json({
         error: 'Multi-zone layout rendering failed.',
         detail: 'An unexpected error occurred while rendering the layout.',
       });
     }
-    return handleRenderStandard(req, res, device, profile, { ...opts, isFallback: true, signal });
+    return handleRenderStandard(req, res, device, profile, { ...cmdOpts, isFallback: true, signal });
   }
 
   if (!renderResult || renderResult.unsupported) {
     if (isExplicit) {
+      if (cmdOpts.pendingCmd) res.setHeader('X-ST-Command', cmdOpts.pendingCmd);
+      markCommandDelivered(device.id, cmdOpts);
       return res.status(501).json({
         error: 'Multi-zone layout rendering failed or not supported.',
         detail: renderResult?.reason || 'Browser unavailable for multi-zone rendering',
       });
     }
     // Auto mode fallback to standard single-item rendering
-    return handleRenderStandard(req, res, device, profile, { ...opts, isFallback: true, signal });
+    return handleRenderStandard(req, res, device, profile, { ...cmdOpts, isFallback: true, signal });
   }
 
   // ── Post-process ─────────────────────────────────────────────────────────────
@@ -1195,6 +1528,8 @@ async function handleRenderLayout(req, res, device, profile, opts = {}) {
     processed = await postprocess(renderResult.png, profile);
   } catch (e) {
     console.error('[embedded] postprocess error:', e.message);
+    if (cmdOpts.pendingCmd) res.setHeader('X-ST-Command', cmdOpts.pendingCmd);
+    markCommandDelivered(device.id, cmdOpts);
     return res.status(500).json({ error: `Post-processing failed: ${e.message}` });
   }
 
@@ -1202,19 +1537,295 @@ async function handleRenderLayout(req, res, device, profile, opts = {}) {
     try { cacheSet(key, processed.buffer); } catch { /* best-effort */ }
   }
 
-  res.set({ ...headers, 'Content-Type': processed.contentType });
+  res.set({
+    ...headers,
+    ...(processed.width && processed.height
+      ? { 'X-ST-Screen-Width': String(processed.width), 'X-ST-Screen-Height': String(processed.height) }
+      : {}),
+    'Content-Type': processed.contentType,
+  });
+  markCommandDelivered(device.id, cmdOpts);
   res.status(200).send(processed.buffer);
 }
 
+// ─── POST /api/embedded/logs ──────────────────────────────────────────────────
+/*
+ * Ingest buffered diagnostic logs uploaded from an embedded device (#3 / mcu#9).
+ * Accepts JSON object ({ logs: [...], log_count, battery, rssi, version }),
+ * JSON array of logs, or plain text log lines.
+ * Emits dashboard:embedded-logs to dashboard subscribers in the device's workspace room.
+ */
+// The MCU ring holds 100 entries (MAX_LOG_ENTRIES per upload). The body is stored whole, so it gets
+// its own small parsers (server.js leaves this path to them) instead of the 12 MB global one.
+const LOG_BODY_LIMIT = '256kb';
+const LOG_RING_UPLOADS = 20;   // uploads kept per device; older ones are pruned on insert
+const MAX_LOG_ENTRIES = 100;
+const logJsonParser = express.json({ limit: LOG_BODY_LIMIT });
+// text/plain: one log line per line. server.js skips its global parser for this path, so without
+// this the plain-text branch of handleDeviceLogs could never run (req.body was {}).
+const logTextParser = express.text({ limit: LOG_BODY_LIMIT, type: 'text/plain' });
+
+function parseLogBody(req, res, next) {
+  const done = (err) => {
+    if (!err) return next();
+    if (err.type === 'entity.too.large') {
+      return res.status(413).json({ error: `Log upload exceeds ${LOG_BODY_LIMIT}` });
+    }
+    return res.status(400).json({ error: 'Malformed log body' });
+  };
+  logJsonParser(req, res, (err) => (err ? done(err) : logTextParser(req, res, done)));
+}
+
+// Only the panel itself uploads its logs: an API token (even a 'full' one) is a reader here.
+function requireDevice(req, res, next) {
+  if (!req.device) return res.status(403).json({ error: 'Only the device itself can upload its diagnostic logs (device token required)' });
+  return next();
+}
+
+router.post('/logs', deviceLogsLimiter, resolveAuth, requireDevice, parseLogBody, (req, res) => handleDeviceLogs(req, res));
+
+function handleDeviceLogs(req, res) {
+  const device = resolveDevice(req, res);
+  if (!device) return;
+
+  touchDeviceHeartbeat(device, req);
+
+  let rawLogs = req.body;
+  let logCount = 0;
+  let battery = null;
+  let wifiRssi = null;
+  let version = null;
+
+  if (typeof rawLogs === 'string') {
+    if (rawLogs.length > 500000) {
+      return res.status(400).json({ error: 'Payload size exceeds limit' });
+    }
+    try {
+      rawLogs = JSON.parse(rawLogs);
+    } catch (_) {
+      const lines = rawLogs.split('\n').filter(Boolean);
+      if (lines.length > MAX_LOG_ENTRIES) {
+        return res.status(400).json({ error: `Log entries exceed maximum limit of ${MAX_LOG_ENTRIES}` });
+      }
+      rawLogs = {
+        logs: lines.map(line => ({ msg: line, level: 'INFO' })),
+        log_count: lines.length
+      };
+    }
+  }
+
+  if (Array.isArray(rawLogs)) {
+    if (rawLogs.length > MAX_LOG_ENTRIES) {
+      return res.status(400).json({ error: `Log entries exceed maximum limit of ${MAX_LOG_ENTRIES}` });
+    }
+    rawLogs = { logs: rawLogs, log_count: rawLogs.length };
+  }
+
+  if (rawLogs && typeof rawLogs === 'object') {
+    if (Array.isArray(rawLogs.logs) && rawLogs.logs.length > MAX_LOG_ENTRIES) {
+      return res.status(400).json({ error: `Log entries exceed maximum limit of ${MAX_LOG_ENTRIES}` });
+    }
+
+    if (rawLogs.battery !== undefined && rawLogs.battery !== null) {
+      const b = Number(rawLogs.battery);
+      if (!Number.isFinite(b) || b < 0 || b > 100) {
+        return res.status(400).json({ error: 'Invalid battery value; must be a finite number between 0 and 100' });
+      }
+      battery = b;
+    }
+
+    const rawRssi = rawLogs.wifi_rssi !== undefined ? rawLogs.wifi_rssi : rawLogs.rssi;
+    if (rawRssi !== undefined && rawRssi !== null) {
+      const r = Number(rawRssi);
+      if (!Number.isFinite(r) || r < -120 || r > 0) {
+        return res.status(400).json({ error: 'Invalid rssi value; must be a finite number between -120 and 0' });
+      }
+      wifiRssi = r;
+    }
+
+    version = (rawLogs.version !== undefined && rawLogs.version !== null) ? String(rawLogs.version) : null;
+    if (Array.isArray(rawLogs.logs)) {
+      logCount = rawLogs.logs.length;
+    } else if (Number.isInteger(rawLogs.log_count)) {
+      logCount = rawLogs.log_count;
+    }
+  }
+
+  if (battery === null && req.headers['x-st-device-battery'] !== undefined) {
+    const bH = Number(req.headers['x-st-device-battery']);
+    if (Number.isFinite(bH) && bH >= 0 && bH <= 100) battery = bH;
+  }
+  if (wifiRssi === null) {
+    const rHRaw = req.headers['x-st-device-rssi'] || req.headers['x-st-device-wifi-rssi'];
+    if (rHRaw !== undefined) {
+      const rH = Number(rHRaw);
+      if (Number.isFinite(rH) && rH >= -120 && rH <= 0) wifiRssi = rH;
+    }
+  }
+  if (!version && req.headers['x-st-firmware-version']) {
+    version = String(req.headers['x-st-firmware-version']);
+  }
+
+  const logJson = typeof rawLogs === 'object' ? JSON.stringify(rawLogs) : String(rawLogs || '');
+
+  const insertAndPrune = db.transaction((devId, json, count, batt, rssi, ver) => {
+    const info = db.prepare(`
+      INSERT INTO device_diagnostic_logs (device_id, log_json, log_count, battery, wifi_rssi, version, uploaded_at)
+      VALUES (?, ?, ?, ?, ?, ?, strftime('%s','now'))
+    `).run(devId, json, count, batt, rssi, ver);
+    const id = info.lastInsertRowid;
+
+    db.prepare(`
+      DELETE FROM device_diagnostic_logs
+      WHERE device_id = ? AND id NOT IN (
+        SELECT id FROM device_diagnostic_logs
+        WHERE device_id = ?
+        ORDER BY uploaded_at DESC, id DESC
+        LIMIT ${LOG_RING_UPLOADS}
+      )
+    `).run(devId, devId);
+
+    return id;
+  });
+
+  let logId;
+  try {
+    logId = insertAndPrune(device.id, logJson, logCount, battery, wifiRssi, version);
+  } catch (err) {
+    console.error('[embedded-logs] Failed to store diagnostic log:', err.message);
+    return res.status(500).json({ error: 'Failed to store diagnostic log' });
+  }
+
+  // Pop pending upload_logs command if queued
+  try {
+    popCommand(device.id, 'upload_logs');
+  } catch (_) {}
+
+  // Broadcast WebSocket event to dashboard room
+  try {
+    const io = req.app.get('io');
+    const dashboardNs = io ? io.of('/dashboard') : null;
+    if (dashboardNs) {
+      const { deviceRoom, emitToWorkspace } = require('../lib/socket-rooms');
+      // Metadata only: the body (up to 256 kB) is fetched by the page that is looking, from
+      // GET /api/devices/:id/diagnostic-logs, not pushed to every dashboard in the workspace.
+      emitToWorkspace(dashboardNs, deviceRoom(device.id), 'dashboard:embedded-logs', {
+        device_id: device.id,
+        id: logId,
+        log_id: logId,
+        log_count: logCount,
+        size: Buffer.byteLength(logJson, 'utf8'),
+        battery,
+        wifi_rssi: wifiRssi,
+        version,
+        uploaded_at: Math.floor(Date.now() / 1000)
+      });
+    }
+  } catch (err) {
+    console.warn(`[embedded-logs] Failed to emit socket event: ${err.message}`);
+  }
+
+  res.status(200).json({ status: 'ok', log_id: logId, id: logId, count: logCount });
+}
+
+/* ?limit= for the log reads: 1..20 (the per-device ring kept by handleDeviceLogs), default 20. */
+function logListLimit(req) {
+  const n = parseInt(req.query && req.query.limit, 10);
+  return Number.isInteger(n) && n > 0 ? Math.min(n, LOG_RING_UPLOADS) : LOG_RING_UPLOADS;
+}
+
+// ─── GET /api/embedded/logs ───────────────────────────────────────────────────
+router.get('/logs', deviceLogsLimiter, resolveAuth, (req, res) => {
+  const device = resolveDevice(req, res);
+  if (!device) return;
+
+  const logs = db.prepare(`
+    SELECT * FROM device_diagnostic_logs
+    WHERE device_id = ?
+    ORDER BY uploaded_at DESC, id DESC
+    LIMIT ?
+  `).all(device.id, logListLimit(req));
+
+  res.json({ logs });
+});
+
+// ─── Firmware Distribution & OTA Management ───────────────────────────────────
+
+// GET /api/embedded/firmware/:preset/version
+router.get('/firmware/:preset/version', firmwareLimiter, (req, res) => {
+  const preset = req.params.preset;
+  const fw = getFirmwareInfo(preset);
+  if (!fw) {
+    return res.status(404).json({ error: `No firmware found for preset '${preset}'` });
+  }
+
+  res.json({
+    preset: fw.preset,
+    version: fw.version,
+    size: fw.size,
+    sha256: fw.sha256,
+    download_url: fw.download_url
+  });
+});
+
+// GET /api/embedded/firmware/:preset/latest.bin
+router.get('/firmware/:preset/latest.bin', firmwareLimiter, (req, res) => {
+  const preset = req.params.preset;
+  const fw = getFirmwareInfo(preset);
+  if (!fw) {
+    return res.status(404).json({ error: `No firmware found for preset '${preset}'` });
+  }
+
+  res.setHeader('Content-Type', 'application/octet-stream');
+  res.setHeader('Content-Length', fw.size);
+  res.setHeader('Content-Disposition', `attachment; filename="${fw.preset}-firmware.bin"`);
+  if (fw.version) {
+    res.setHeader('X-ST-Firmware-Version', fw.version);
+  }
+  res.setHeader('X-ST-Firmware-SHA256', fw.sha256);
+
+  const stream = fs.createReadStream(fw.filePath);
+  stream.on('error', (err) => {
+    stream.destroy();
+    if (!res.headersSent) {
+      res.status(500).end();
+    } else {
+      res.destroy();
+    }
+  });
+  stream.pipe(res);
+});
+
 // ─── Helpers ────────────────────────────────────────────────────────────────────
+
+/*
+ * The frame description every render answer carries, 304 and cache hit included:
+ *   X-ST-Screen-Width / -Height  the frame's dimensions as sent (after any server-side rotation)
+ *   X-ST-Rotation                 the mount rotation the frame was composed for, degrees
+ *   X-ST-Orientation              the stated orientation, else the composed box's shape
+ * See docs/embedded-renderer.md (Orientation and rotation) for what firmware does with them.
+ */
+function frameHeaders(profile) {
+  const dims = frameDimensions(profile);
+  return {
+    'X-ST-Screen-Width': String(dims.width),
+    'X-ST-Screen-Height': String(dims.height),
+    'X-ST-Rotation': String(profile.rotation || 0),
+    'X-ST-Orientation': frameOrientation(profile),
+  };
+}
 
 function detectContentType(profile) {
   switch (profile.outputFormat) {
-    case 'png': return 'image/png';
+    case 'png':            return 'image/png';
     case 'jpeg':
-    case 'jpg': return 'image/jpeg';
-    case 'bmp': return 'image/bmp';
-    default:    return 'application/octet-stream';
+    case 'jpg':            return 'image/jpeg';
+    case 'bmp':            return 'image/bmp';
+    case 'x-epd-packed':
+    case 'x-epd-spectra6':
+    case 'x-epd-gray16':
+    case 'raw':
+    default:               return 'application/octet-stream';
   }
 }
 
@@ -1227,5 +1838,11 @@ module.exports.resolveDeviceContext = resolveDeviceContext;
 module.exports.touchDeviceHeartbeat = touchDeviceHeartbeat;
 module.exports.dynamicRevFor = dynamicRevFor;
 module.exports.dynamicPeriodFor = dynamicPeriodFor;
+module.exports.getPendingCommand = getPendingCommand;
+module.exports.resolvePendingCommand = resolvePendingCommand;
+module.exports.normalizePresetName = normalizePresetName;
+module.exports.getFirmwareInfo = getFirmwareInfo;
+module.exports.otaBreaker = otaBreaker;
+module.exports.logListLimit = logListLimit;
 
 

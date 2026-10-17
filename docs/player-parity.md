@@ -153,9 +153,29 @@ describe content rendering. They are informational, and shown to the operator in
 | `playback.zones` | ✅ `ZoneManager` | ✅ | ✅ | ✅ | ✅ `ZoneRunner` — Android's rules incl. orphan→largest-zone fallback (e2e) | ✅ as Pi — shared engine |
 | `playback.wall_zones` | ✅ `WallZoneRenderer` — emulator: mid-hold join, clock-aligned timecodes, cold-boot restore | ✅ two-browser wall e2e (timeline, freeze, audio per zone, seam crop) | ✅ `WallZoneRenderer` — vm tests + headless Chrome smoke; ❓ not on a TV | ⚠️ declared (it is the web player) — not run on hardware; video is a hardware plane | ✅ `wallzones` mode — Xvfb scene runs on PySide6 6.11 and on Trixie's own Qt/PySide6 6.8.2 (container); ❓ not on Pi hardware | ✅ as Pi — shared engine; ❓ not run on Windows |
 | `playback.hold` | ✅ fullscreen, zones, wall zones | ✅ | ✅ (AVPlay freeze: stub-tested only) | ⚠️ as web, not run on hardware | ✅ single, zones, wall zones | ✅ as Pi — shared engine |
-| `playback.transitions` | ✅ `TransitionCompositor` | ⚠️ declared only when the bundle loads (`transitionRuntimeReady()`) — a failed load hard-cuts rather than breaking playback | ✅ `transitions.js` | ⚠️ composites DOM over video; with hwz it may be **invisible over video** and degrade to a hard cut | ✅ the shared GLSL wrapped for Qt 6 (GLSL-4.40 reserved words renamed) and baked with `qsb`: all 15 bake on Bookworm arm64, and VanEck ran on an OpenGL scene graph (e2e). On a **software** scene graph (no GPU) it crossfades instead — never the black frames ShaderEffect gives there. ❓ not yet seen on a Pi's V3D | ✅ as Pi — shared engine (the same baked shaders); ❓ not yet seen on a Windows GPU (D3D11 RHI) |
+| `playback.transitions` — full screen | ✅ `TransitionCompositor` (one full-screen GL overlay): image↔image and image/local video↔local video wipe; into or out of a widget, bundle, YouTube, stream or live input it cuts | ⚠️ declared only when the bundle loads (`transitionRuntimeReady()`) — a failed load hard-cuts rather than breaking playback | ✅ `transitions.js` | ⚠️ composites DOM over video; with hwz it may be **invisible over video** and degrade to a hard cut | ✅ the shared GLSL wrapped for Qt 6 (GLSL-4.40 reserved words renamed) and baked with `qsb`: all 15 bake on Bookworm arm64, and VanEck ran on an OpenGL scene graph (e2e). On a **software** scene graph (no GPU) it crossfades instead — never the black frames ShaderEffect gives there. ❓ not yet seen on a Pi's V3D | ✅ as Pi — shared engine (the same baked shaders); ❓ not yet seen on a Windows GPU (D3D11 RHI) |
+| `playback.transitions` — in layout zones | ✅ `ZoneManager` + `ZoneTransitionEngine`: every zone plays its own transition concurrently (one shared GL thread, a TextureView per zone wipe). Same media rule as full screen. Missing shader → GL crossfade; more than 4 GL zone wipes at once (2 on low-RAM / <2.5 GB devices) → a view crossfade; not started in 1.2 s → cut. Emulator: 4 concurrent wipes on a rotated stage, image↔video, layout switch mid-wipe. ❓ not yet seen on a Fire TV Stick | ❌ zones cut (the transition is ignored) | ❌ zones cut | ❌ zones cut (inherits the web player) | ✅ each zone `Surface` has its own `TransitionRunner` (live snapshots, so widgets wipe too); missing/uncompiled shader → crossfade | ✅ as Pi — shared engine |
 | `playback.pip` | ✅ `PipOverlay` | ✅ `#pipContainer` | ✅ `pip-overlay.js` | ⚠️ same hwz caveat as transitions | ✅ `PipLayer.qml` (Android geometry) | ✅ as Pi — shared engine |
 | `playback.bundle` | ✅ WebView, `playItem` + `ZoneManager` | ✅ `renderBundleBuffered`, server-flattened document | ✅ `renderBundle` + zone branch | ✅ inherits the web player | ✅ server-flattened render, cached on disk (24 MB) like Android's `BundleCache` | ✅ as Pi — shared engine |
+| bundle skip, `screentinker:skip` (#649; no capability: nothing on the dashboard depends on it) | ⚠️ full screen only: `BundleSkip.inject` + `STBundleSkip` bridge, token per mount (JVM-tested); zone bundles load by URL and play their duration | ✅ full screen + zones (headless-Chrome e2e with real zips) | ✅ full screen + zones (`player.js` in the vm harness); ❓ not on a panel | ✅ inherits the web player; ❓ not run on hardware | ⚠️ from the cached render only (not a bundle's first, uncached play): console bridge + token (pytest) | ⚠️ as Pi — shared engine |
+
+**Transitions in zones.** A transition is a widget placed in a zone; the server resolves it per
+zone (`server/lib/transition-config.js`, #647) onto each item as `item.transition`, and the player
+plays the transition of the item a zone moves into. A zone transitions only into a *different* item
+after its first paint (a zone re-showing its only item does not play an effect into itself), and the
+wipe counts inside the item's dwell, so a zone keeps its cadence. On Android the outgoing frame is
+the zone's ImageView bitmap or its video TextureView, the incoming one the decoded image or the
+clip's first frame, both fitted the way the zone frames them (cover / contain / fill) into a texture
+whose long edge is at most 960. What wipes there:
+
+| from \ to | image | local (cached) video | stream, uncached video, widget, bundle, YouTube, live input, hold |
+|---|---|---|---|
+| image | wipe | wipe (into frame 0, the clip starts when it lands) | cut |
+| video | wipe | wipe | cut |
+| widget / bundle / YouTube / live input / nothing | cut | cut | cut |
+
+Players that ignore zone transitions simply cut, so no capability gates them: the server sends
+the same payload either way.
 
 `playback.bundle` is an uploaded HTML bundle (`.wgt` / `.zip`) played as a playlist item. It means
 the player can **mount** one — today that is the server's flattened single-document render at
@@ -178,6 +198,18 @@ declares a policy granting `data:` to script/style/img/font — untested on real
 shipping that policy needs a **new `.wgt`**, which the fleet has no in-app OTA to receive. The
 online `src=` path is deliberately left as the default so the unproven path can only ever replace
 "nothing to show at all".
+
+**Bundle skip (#649).** A bundle may post `{ type: 'screentinker:skip', reason? }` to its parent
+and the player moves on at once without counting a play ([html-bundles.md](html-bundles.md) has the
+contract). The rules — which message counts, the reason's shape, and the once-per-pass guard — are
+one module per language held to `shared/bundle-skip-vectors.json` (`server/lib/bundle-skip.js` for
+web and Tizen, `BundleSkip.kt`, `logic/bundle_skip.py`). Who may ask differs by mount: the web player
+and Tizen frame a bundle and match the message's `source` to the registered frame; Android and the
+native player load it top-level, so an injected listener accepts only the bundle's own window and
+forwards a random per-mount token the player checks. Ignored on a wall, in a synced group and in
+wall zones (the shared clock), and in a campaign's full-screen step (a one-item zone). Proof of play:
+`play_end` with `skipped: true`, which the server turns into a DELETE of that item's open row and a
+throttle wind-back.
 
 ⚠️ Baselines: `playback.bundle` is in the **web** and **brightsign** baselines only. Those two are
 served from this server, so there is no such thing as a panel stuck on last release's player.
@@ -211,6 +243,7 @@ an un-updated one keeps via the baseline. See gap 2.
 | `remote.screenshot` | ⚠️ `captureView` always (a real frame of the player's own view); full-screen only with accessibility or MediaProjection. Declared **only** for the full-screen path | ⚠️ canvas only — same-origin content, and the alpha probe rejects frames where no pixels arrived | ⚠️ `captureAndSend` captures **images only**; video and YouTube get an honest status card reading "Live preview unavailable for video / YouTube on Tizen" | ⚠️ `st-bridge.js` gates host framebuffer capture on **primary storage**; without a disk it falls back to canvas, which cannot read the video plane | ✅ `grabWindow()` — the whole scene incl. video and WebEngine, JPEG q40 ≤960 px (e2e) | ✅ as Pi — shared engine (`grabWindow()`) |
 | `remote.stream` | ✅ | ✅ 1fps | ✅ 1s interval over `captureAndSend`, so the same image-only limit | ⚠️ as web | ✅ Android pacing 350–1200 ms (e2e: 18 frames / 6 s) | ✅ as Pi — shared engine |
 | `remote.input` | ✅ `TouchInjector` — plain `dispatchTouchEvent`, no privilege | ✅ | ✅ `elementFromPoint().click()` + D-pad/volume keys | ✅ synthesised DOM events, needs no host | ✅ Qt mouse/key events into the player window; POWER/HOME/VOLUME mapped | ✅ as Pi — shared engine (Qt events into the player window) |
+| `remote.screen_share` (3.0, [screen-share.md](screen-share.md)) | ✅ `ScreenShareReceiver` (bundled libwebrtc) into a TextureView; capture shows the share; ❓ device run | ✅ in a browser and the iOS app; withheld in the webOS / Vega shells | ⚠️ Tizen 10+ only (Samsung's spec); capture is an honest card; ❓ hardware run | ❌ WebRTC behind `camera_enabled`, undocumented for receive — withheld | ✅ the server's receiver in the QtWebEngine RTC page (page run in Chromium e2e); ❓ Pi run, VP8/VP9 software decode | ✅ as Pi (macOS too) |
 
 ## Lifecycle
 

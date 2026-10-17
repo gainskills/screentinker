@@ -81,8 +81,8 @@ function requiredDeps(pkg, builtinDriver) {
 
 /**
  * The `engines.node` floor this host is below, or null. Only the `>=X.Y.Z` form the server uses.
- * A warning, never a refusal: a server on an older Node mostly still works, and refusing to start
- * would turn an upgrade into an outage for someone who cannot change Node today.
+ * Kept for callers and tests; since 3.0 the refusal itself is lib/node-guard.js, which server.js
+ * runs before this file, so preflight() only reaches here below the floor with ST_ALLOW_OLD_NODE=1.
  */
 function nodeBelowFloor(pkg, version = process.versions.node) {
   const m = String((pkg && pkg.engines && pkg.engines.node) || '').match(/^>=\s*v?(\d+)\.(\d+)\.(\d+)\s*$/);
@@ -200,9 +200,9 @@ function nativeModuleBroken() {
 /*
  * Can this host use Node's built-in driver instead?
  *
- * ⚠️ NODE 24 IN PRACTICE. node:sqlite is only usable without a flag from Node 23.4 onwards; on the
- * 22.x line — which is this project's declared floor — it exists ONLY behind --experimental-sqlite,
- * so a 22.x server started normally has no built-in driver at all.
+ * node:sqlite is usable without a flag from Node 22.13 (and 23.4 on the odd line), so on the
+ * declared 22.14 floor it is normally there — experimental, with an ExperimentalWarning — while on
+ * Node 20 and 22.0-22.12 a server started normally has no built-in driver at all.
  *
  * Hence a probe rather than a version comparison: `require` answers what this exact process can do,
  * including the 22.x-with-the-flag case, and cannot be fooled by a floor that says 22.9 while the
@@ -257,19 +257,58 @@ function fail(reason, hint) {
   process.exit(1);
 }
 
+/*
+ * ⚠️ AN UPGRADE OWNS node_modules WHILE IT RUNS. scripts/upgrade.sh writes server/.upgrade-in-progress
+ * ("<pid> <epoch> <tag>") before it touches Node or dependencies, and removes it just before its own
+ * restart. A server started in between (apt's needrestart after the Node install, a crash restart)
+ * found the tree half-installed and ran npm itself, alongside the upgrade's `npm ci`: on prod
+ * (2026-10-15) the two left stripe and apache-arrow files out, and billing broke.
+ *
+ * So while a LIVE marker exists, wait for it instead of repairing anything. Waiting, not exiting:
+ * exit-and-restart every few seconds can hit systemd's start limit, after which the unit refuses
+ * the upgrade's own restart. A marker whose pid is gone, or that is older than MARKER_MAX_AGE_S, is
+ * stale (a killed upgrade) and ignored, so a server is never held forever.
+ */
+const UPGRADE_MARKER = path.join(SERVER_DIR, '.upgrade-in-progress');
+const MARKER_MAX_AGE_S = 2 * 60 * 60;
+const MARKER_WAIT_MS = 15 * 60 * 1000;
+
+function pidAlive(pid) {
+  try { process.kill(pid, 0); return true; } catch (e) { return e.code === 'EPERM'; }   // EPERM: alive, another user's
+}
+
+/** The live upgrade marker as { pid, since, tag }, or null when there is none or it is stale. */
+function upgradeInProgress(file = UPGRADE_MARKER, now = Date.now()) {
+  let raw;
+  try { raw = fs.readFileSync(file, 'utf8'); } catch (_) { return null; }
+  const [pidS, sinceS, tag] = raw.trim().split(/\s+/);
+  const pid = Number(pidS); const since = Number(sinceS);
+  if (!Number.isInteger(pid) || pid <= 0 || !Number.isFinite(since)) return null;
+  if (now / 1000 - since > MARKER_MAX_AGE_S) return null;
+  if (!pidAlive(pid)) return null;
+  return { pid, since, tag: tag || '' };
+}
+
+function waitForUpgrade(file = UPGRADE_MARKER, maxMs = MARKER_WAIT_MS) {
+  let m = upgradeInProgress(file);
+  if (!m) return;
+  console.warn(`[preflight] an upgrade${m.tag ? ' to ' + m.tag : ''} is installing (pid ${m.pid}); waiting for it before touching dependencies.`);
+  const sleeper = new Int32Array(new SharedArrayBuffer(4));
+  const until = Date.now() + maxMs;
+  while (m && Date.now() < until) { Atomics.wait(sleeper, 0, 0, 2000); m = upgradeInProgress(file); }
+  console.warn(m ? '[preflight] still marked as upgrading after 15 min; checking dependencies anyway.'
+                 : '[preflight] the upgrade has finished; checking dependencies.');
+}
+
 function preflight() {
   // Same spellings as every other boolean the server accepts, so an operator who writes `true`
   // does not silently get a boot that reaches for the registry anyway.
   if (['1', 'true', 'yes'].includes(String(process.env.ST_SKIP_DEP_PREFLIGHT || '').toLowerCase())) return;
 
-  try {
-    const floor = nodeBelowFloor(JSON.parse(fs.readFileSync(path.join(SERVER_DIR, 'package.json'), 'utf8')));
-    if (floor) {
-      console.warn(`[preflight] ⚠️ Node ${process.versions.node} is older than this release needs (>= ${floor}).`);
-      console.warn('[preflight]    The native SQLite driver needs Node 22.14+, so the server starts only where Node\'s built-in node:sqlite can stand in, and Chromium rendering (puppeteer-core) may be missing.');
-      console.warn('[preflight]    Upgrade Node: see "Upgrading Node.js" in docs/operations.md.');
-    }
-  } catch { /* no package.json: missingDeps() reports nothing either */ }
+  waitForUpgrade();
+
+  // The Node floor is lib/node-guard.js's job (server.js runs it first); it has already refused or,
+  // under ST_ALLOW_OLD_NODE=1, said its piece.
 
   const missing = missingDeps();
   const nodeModulesAbsent = !fs.existsSync(NODE_MODULES);
@@ -397,4 +436,4 @@ function preflight() {
   }
 }
 
-module.exports = { preflight, missingDeps, nativeModuleBroken, requiredDeps, nodeBelowFloor, staleDeps, productionTree, npmEnv, reconcileArgs };
+module.exports = { preflight, upgradeInProgress, waitForUpgrade, missingDeps, nativeModuleBroken, requiredDeps, nodeBelowFloor, staleDeps, productionTree, npmEnv, reconcileArgs };

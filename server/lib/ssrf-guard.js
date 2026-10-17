@@ -334,7 +334,11 @@ function pinnedLookup(vettedAddresses) {
  * @param {'stream'|'text'|'buffer'} [options.responseType='stream'] Response format
  * @param {string|Buffer} [options.body] Optional request body (capped at 64KiB)
  * @param {boolean} [options.accept2xx=false] Treat any 2xx as success (webhooks: Discord 204)
- * @returns {Promise<{res?: import('http').IncomingMessage, text?: string, buffer?: Buffer, notModified?: boolean, statusCode: number, headers: object}>}
+ * @param {boolean} [options.acceptAnyStatus=false] Resolve with the response whatever its status
+ *   (redirects are still followed or refused as above), for an API that explains a 4xx in its body
+ *   (Telegram: "chat not found", retry_after). The caller judges statusCode itself.
+ * @returns {Promise<{res?: import('http').IncomingMessage, text?: string, buffer?: Buffer, notModified?: boolean, statusCode: number, headers: object, finalUrl?: string}>}
+ *   finalUrl is the address that answered after any redirects, for resolving relative links in it.
  */
 // Headers that must not survive a cross-origin redirect. Matched case-insensitively.
 const SENSITIVE_HEADERS = new Set(['authorization', 'cookie', 'proxy-authorization']);
@@ -356,6 +360,7 @@ function guardedRequest(urlString, options = {}) {
   const validators = options.validators || null;
   const responseType = options.responseType || 'stream';
   const accept2xx = !!options.accept2xx;
+  const acceptAnyStatus = !!options.acceptAnyStatus;
 
   let bodyBuf = null;
   if (options.body != null) {
@@ -426,7 +431,7 @@ function guardedRequest(urlString, options = {}) {
           return follow(next, redirectsLeft - 1, nextHdrs).then(resolve, reject);
         }
 
-        const ok = accept2xx ? (sc >= 200 && sc < 300) : (sc === 200);
+        const ok = acceptAnyStatus || (accept2xx ? (sc >= 200 && sc < 300) : (sc === 200));
         if (!ok) {
           res.resume();
           clearDeadlineTimer();
@@ -435,7 +440,7 @@ function guardedRequest(urlString, options = {}) {
 
         if (responseType === 'stream') {
           clearDeadlineTimer();
-          return resolve({ res, statusCode: sc, headers: res.headers });
+          return resolve({ res, statusCode: sc, headers: res.headers, finalUrl: url.toString() });
         }
 
         const chunks = [];
@@ -455,9 +460,9 @@ function guardedRequest(urlString, options = {}) {
           clearDeadlineTimer();
           const buf = Buffer.concat(chunks);
           if (responseType === 'text') {
-            resolve({ text: buf.toString('utf8'), statusCode: sc, headers: res.headers });
+            resolve({ text: buf.toString('utf8'), statusCode: sc, headers: res.headers, finalUrl: url.toString() });
           } else {
-            resolve({ buffer: buf, statusCode: sc, headers: res.headers });
+            resolve({ buffer: buf, statusCode: sc, headers: res.headers, finalUrl: url.toString() });
           }
         });
 
@@ -491,7 +496,15 @@ function guardedRequest(urlString, options = {}) {
     }, reject);
   });
 
-  return follow(urlString, maxRedirects);
+  /*
+   * The outbound ledger (lib/outbound-ledger.js) names the feature behind a request from its
+   * caller's stack. The request itself is made in a .then() after DNS vetting, where the caller is
+   * no longer on the stack, so the attribution is read HERE, synchronously, and carried along.
+   * Nothing about the request changes; with the ledger not installed this is a plain call.
+   */
+  const ledger = require('./outbound-ledger');
+  const ctx = ledger.captureContext();
+  return ctx ? ledger.withContext(ctx, () => follow(urlString, maxRedirects)) : follow(urlString, maxRedirects);
 }
 
 module.exports = {

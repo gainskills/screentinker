@@ -62,7 +62,7 @@ ScreenTinker is a free, open-source **digital signage CMS** you can self-host on
 - **Public REST API** — scoped personal access tokens (`read` / `write` / `full`) over the same resources the dashboard uses, workspace-confined by construction. Documented as an OpenAPI 3.1 contract ([`docs/openapi.yaml`](docs/openapi.yaml)) and browsable on any instance at `/docs` (served locally, no CDN, so it works air-gapped)
 - **Node Mesh** — link ScreenTinker servers together so one dashboard can watch many. A site server reports upward to a hub over a consent-scoped link; a hub can relay content back down to a customer's server. Data flows up by default and nothing flows down uninvited: every write is a *request* the receiving server decides on against its own grant. See [Node Mesh](#node-mesh) below
 - **Triggers** — let an external system interrupt a playlist with different content, fired over the LAN by HTTP POST or a UDP datagram (`ST1 <secret> <token>`). Resolved entirely on the device, so an evacuation message still appears with the WAN down. Targets a published playlist whose items are all cached locally, checked when you save rather than when it fires
-- **Embedded & E-Paper Displays** — server-side renderer for low-power MCUs (ESP32-S3, Seeed Studio reTerminal Sticky, Waveshare e-paper, SPI TFTs). Delivers pre-dithered 1-bit bitstreams, RGB565, BMP, or PNG over HTTP with ETag/304 caching and deep sleep coordination. See [`docs/embedded-renderer.md`](docs/embedded-renderer.md)
+- **Embedded & E-Paper Displays** — server-side renderer for low-power MCUs (ESP32-S3, Seeed Studio reTerminal Sticky & E-Series E1001–E1004, Waveshare e-paper, SPI TFTs). Delivers pre-dithered 1-bit bitstreams, 6-color Spectra 6 (`x-epd-spectra6`), 16-level grayscale (`x-epd-gray16`), RGB565, BMP, or PNG over HTTP with ETag/304 caching, panel-stated orientation/rotation (`0°`/`90°`/`180°`/`270°`), battery & environmental telemetry (`SHT40` temp/humidity, USB/battery power source), diagnostic log uploads, and operator-started OTA firmware updates for Seeed reTerminal panels from binaries this server hosts (SHA-256-verified). See [`docs/embedded-renderer.md`](docs/embedded-renderer.md)
 - **Activity log** — full audit trail of user and system actions
 
 ## Architecture
@@ -175,7 +175,8 @@ a kiosk and it has not been certified on hardware; see [docs/vega-player.md](doc
 
 ### Requirements
 
-- Node.js **20.6+** (the npm scripts use the built-in `--env-file-if-exists` flag, added in 20.6)
+- Node.js **22.14+** — required. Since 3.0 the server refuses to start on an older Node (exit code 78)
+  rather than crash-looping; see [Upgrading to 3.0](docs/upgrading-to-3.0.md). `.nvmrc` pins the major.
 - Linux, macOS, or Windows
 - SQLite (bundled via `better-sqlite3`; no separate install needed — `npm install` handles the native bindings)
 - **ffmpeg** (optional but recommended) — powers video thumbnails and duration extraction
@@ -801,6 +802,8 @@ User=screentinker
 WorkingDirectory=/opt/screentinker/server
 ExecStart=/usr/bin/node server.js
 Restart=always
+# 78 = the server refused to start because Node is older than 22.14 - restarting will not help.
+RestartPreventExitStatus=78
 Environment=PORT=3001
 Environment=NODE_ENV=production
 Environment=SELF_HOSTED=true

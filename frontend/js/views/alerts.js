@@ -2,6 +2,7 @@ import { api } from '../api.js';
 import { showToast } from '../components/toast.js';
 import { esc } from '../utils.js';
 import { t, tn } from '../i18n.js';
+import { mountSettings as mountVerification } from '../components/screen-verify.js';
 
 /*
  * Alerts — where a workspace hears that a screen went offline and came back (server:
@@ -9,7 +10,7 @@ import { t, tn } from '../i18n.js';
  * edit that leaves the field empty keeps what is stored.
  */
 
-const KINDS = ['slack', 'teams', 'email', 'pagerduty', 'webhook'];
+const KINDS = ['slack', 'teams', 'email', 'pagerduty', 'telegram', 'webhook'];
 let cache = { channels: [], devices: [], groups: [] };
 
 function ago(sec) {
@@ -27,6 +28,7 @@ function scopeSummary(c) {
 function target(c) {
   if (c.kind === 'email') return (c.emails || []).join(', ');
   if (c.kind === 'pagerduty') return t('alerts.pd_key', { hint: c.routing_key_hint || '' });
+  if (c.kind === 'telegram') return t('alerts.tg_target', { chat: c.chat_id || '', hint: c.bot_token_hint || '' });
   return c.url_hint || '';
 }
 
@@ -57,10 +59,12 @@ export async function render(app) {
     const [chs, devs, grps] = await Promise.all([api.get('/alert-channels'), api.get('/devices'), api.get('/groups')]);
     cache = { channels: Array.isArray(chs) ? chs : [], devices: Array.isArray(devs) ? devs : (devs.devices || []), groups: Array.isArray(grps) ? grps : (grps.groups || []) };
   } catch (e) { body.innerHTML = `<p class="corp-notice corp-notice-danger">${esc((e && e.message) || t('common.error'))}</p>`; return; }
-  body.innerHTML = `<div class="corp-toolbar"><button class="btn btn-primary" id="alNew">${esc(t('alerts.new'))}</button></div>
+  body.innerHTML = `<div id="svSettings"></div><div class="corp-toolbar"><button class="btn btn-primary" id="alNew">${esc(t('alerts.new'))}</button></div>
     ${cache.channels.length ? cache.channels.map(card).join('') : `<div class="corp-empty">${esc(t('alerts.empty'))}</div>`}
     <p class="corp-help" style="font-size:12px;margin-top:16px">${esc(t('alerts.owner_note'))}</p>`;
   document.getElementById('alNew').addEventListener('click', () => openForm(app, null));
+  // Screen verification settings and incident history sit above the channels they alert through.
+  mountVerification(document.getElementById('svSettings'));
   body.querySelectorAll('.corp-card[data-id]').forEach((el) => {
     const c = cache.channels.find((x) => x.id === el.dataset.id);
     el.querySelector('[data-act="edit"]').addEventListener('click', () => openForm(app, c));
@@ -83,7 +87,7 @@ function openForm(app, ch) {
   const kind0 = ch ? ch.kind : 'slack';
   const scopeKind = !ch || (ch.scopes || []).some((s) => s.scope_kind === 'workspace') ? 'workspace' : (ch.scopes || []).some((s) => s.scope_kind === 'group') ? 'group' : 'device';
   const chosen = new Set((ch && ch.scopes || []).map((s) => s.scope_id));
-  const ev = new Set(ch ? ch.events : ['device_offline', 'device_online']);
+  const ev = new Set(ch ? ch.events : ['device_offline', 'device_online', 'screen_problem', 'screen_ok']);
   const overlay = document.createElement('div');
   overlay.style.cssText = 'position:fixed;inset:0;background:rgba(0,0,0,0.6);display:flex;align-items:center;justify-content:center;z-index:1000;padding:16px';
   overlay.innerHTML = `<div style="background:var(--bg-card);border:1px solid var(--border);border-radius:var(--radius-lg);padding:24px;width:640px;max-width:100%;max-height:92vh;overflow:auto">
@@ -95,7 +99,9 @@ function openForm(app, ch) {
     <div class="form-group"><label>${esc(t('alerts.f.events'))}</label>
       <label style="display:flex;gap:8px;font-size:13px"><input type="checkbox" id="alEvOff" ${ev.has('device_offline') ? 'checked' : ''}> ${esc(t('alerts.f.ev_off'))}
         <input type="number" id="alMin" class="input" min="2" max="1440" value="${esc(ch ? ch.offline_minutes : 5)}" style="width:80px;display:inline-block"> ${esc(t('alerts.f.minutes'))}</label>
-      <label style="display:flex;gap:8px;font-size:13px;margin-top:6px"><input type="checkbox" id="alEvOn" ${ev.has('device_online') ? 'checked' : ''}> ${esc(t('alerts.f.ev_on'))}</label></div>
+      <label style="display:flex;gap:8px;font-size:13px;margin-top:6px"><input type="checkbox" id="alEvOn" ${ev.has('device_online') ? 'checked' : ''}> ${esc(t('alerts.f.ev_on'))}</label>
+      <label style="display:flex;gap:8px;font-size:13px;margin-top:6px"><input type="checkbox" id="alEvSvBad" ${ev.has('screen_problem') ? 'checked' : ''}> ${esc(t('alerts.f.ev_screen_problem'))}</label>
+      <label style="display:flex;gap:8px;font-size:13px;margin-top:6px"><input type="checkbox" id="alEvSvOk" ${ev.has('screen_ok') ? 'checked' : ''}> ${esc(t('alerts.f.ev_screen_ok'))}</label></div>
     <div class="form-group"><label>${esc(t('alerts.f.scope'))}</label>
       <select id="alScope" class="input" style="width:auto">${['workspace', 'group', 'device'].map((k) => `<option value="${k}" ${scopeKind === k ? 'selected' : ''}>${esc(t(`alerts.scope.${k}`))}</option>`).join('')}</select>
       <div id="alScopeList" style="margin-top:8px;max-height:150px;overflow:auto;display:flex;flex-direction:column;gap:4px"></div></div>
@@ -115,6 +121,11 @@ function openForm(app, ch) {
     if (k === 'email') host.innerHTML = `<div class="form-group"><label>${esc(t('alerts.f.emails'))}</label><input id="alEmails" class="input" value="${esc(ch && ch.emails ? ch.emails.join(', ') : '')}" placeholder="ops@example.com, manager@example.com"></div>`;
     else if (k === 'pagerduty') host.innerHTML = `<div class="form-group"><label>${esc(t('alerts.f.pd_key'))}</label><input id="alSecret1" class="input" autocomplete="off" placeholder="${esc(ch && ch.routing_key_hint ? ch.routing_key_hint : '')}">
       <div class="corp-help" style="font-size:12px;margin-top:4px">${esc(t('alerts.f.pd_hint'))} ${esc(keep)}</div></div>`;
+    else if (k === 'telegram') host.innerHTML = `<div class="form-group"><label>${esc(t('alerts.f.tg_token'))}</label><input id="alSecret1" type="password" class="input" autocomplete="off" placeholder="${esc(ch && ch.bot_token_hint ? ch.bot_token_hint : '123456789:AA…')}">
+      <div class="corp-help" style="font-size:12px;margin-top:4px">${esc(keep)}</div></div>
+      <div class="form-group"><label>${esc(t('alerts.f.tg_chat'))}</label><input id="alChat" class="input" autocomplete="off" value="${esc(ch && ch.chat_id ? ch.chat_id : '')}" placeholder="-1001234567890">
+      <div class="corp-help" style="font-size:12px;margin-top:4px">${esc(t('alerts.f.tg_hint'))}</div></div>
+      <div class="form-group"><label style="display:flex;align-items:center;gap:8px"><input id="alTgSilent" type="checkbox" ${ch && ch.silent_info ? 'checked' : ''}> ${esc(t('alerts.f.tg_silent'))}</label></div>`;
     else host.innerHTML = `<div class="form-group"><label>${esc(t(`alerts.f.url_${k}`))}</label><input id="alUrl" class="input" autocomplete="off" placeholder="${esc(ch && ch.url_hint ? ch.url_hint : 'https://…')}">
       <div class="corp-help" style="font-size:12px;margin-top:4px">${esc(t(`alerts.f.url_${k}_hint`))} ${esc(keep)}</div></div>
       ${k === 'webhook' ? `<div class="form-group"><label>${esc(t('alerts.f.secret'))}</label><input id="alSecret2" class="input" autocomplete="off" placeholder="${esc(ch && ch.has_secret ? '••••••' : '')}">
@@ -137,11 +148,13 @@ function openForm(app, ch) {
     const k = $('alKind').value;
     const scope = $('alScope').value;
     const ids = [...overlay.querySelectorAll('#alScopeList input:checked')].map((i) => i.value);
-    const events = [$('alEvOff').checked && 'device_offline', $('alEvOn').checked && 'device_online'].filter(Boolean);
+    const events = [$('alEvOff').checked && 'device_offline', $('alEvOn').checked && 'device_online',
+      $('alEvSvBad').checked && 'screen_problem', $('alEvSvOk').checked && 'screen_ok'].filter(Boolean);
     const body = { kind: k, name: $('alName').value.trim(), events, offline_minutes: Number($('alMin').value), enabled: $('alEnabled').checked,
       scopes: scope === 'workspace' ? [{ scope_kind: 'workspace' }] : ids.map((id) => ({ scope_kind: scope, scope_id: id })) };
     if (k === 'email') body.emails = $('alEmails').value;
     else if (k === 'pagerduty') body.routing_key = $('alSecret1').value.trim();
+    else if (k === 'telegram') { body.bot_token = $('alSecret1').value.trim(); body.chat_id = $('alChat').value.trim(); body.silent_info = $('alTgSilent').checked; }
     else { body.url = $('alUrl').value.trim(); if (k === 'webhook' && $('alSecret2').value) body.secret = $('alSecret2').value; }
     if (!body.scopes.length) { $('alError').textContent = t('alerts.scope_required'); return; }
     $('alSave').disabled = true;

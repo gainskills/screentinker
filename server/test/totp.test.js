@@ -60,14 +60,16 @@ async function enroll(token) {
   assert.match(s.body.otpauth_uri, /^otpauth:\/\/totp\//);
   assert.match(s.body.qr_data_url, /^data:image\/png;base64,/);
   const e = await jfetch('/api/auth/totp/enable', post(token, { code: authenticator.generate(s.body.secret) }));
-  return { secret: s.body.secret, recovery: e.body.recovery_codes };
+  // 3.0: enabling TOTP ends every other session (token_version) and hands THIS one a fresh token.
+  return { secret: s.body.secret, recovery: e.body.recovery_codes, token: e.body.token };
 }
 
 test('enrollment: setup -> enable issues 10 recovery codes; status reflects it', async () => {
   const u = await newUser();
-  const { recovery } = await enroll(u.token);
+  const { recovery, token } = await enroll(u.token);
   assert.equal(recovery.length, 10);
-  const st = await jfetch('/api/auth/totp/status', auth(u.token));
+  assert.equal((await jfetch('/api/auth/me', auth(u.token))).status, 401, '3.0: the pre-enrolment session is over');
+  const st = await jfetch('/api/auth/totp/status', auth(token));
   assert.equal(st.body.enabled, true);
   assert.equal(st.body.recovery_codes_remaining, 10);
 });
@@ -102,10 +104,10 @@ test('/totp/verify completes login via recovery code; single-use; surfaces remai
 
 test('API token BYPASSES TOTP: an st_ token works while the owner has TOTP enabled', async () => {
   const u = await newUser();
-  await enroll(u.token);
-  // the pre-existing session token (issued at register, before enroll) still works -
-  // enabling TOTP does NOT invalidate it - so it can mint an API token:
-  const t = await jfetch('/api/tokens', post(u.token, { name: 'ci', scope: 'read' }));
+  // 3.0: enabling TOTP returns a fresh session for the tab that did it (every other session ends),
+  // and that session can mint an API token:
+  const { token } = await enroll(u.token);
+  const t = await jfetch('/api/tokens', post(token, { name: 'ci', scope: 'read' }));
   const secret = Object.values(t.body || {}).find(v => typeof v === 'string' && v.startsWith('st_'));
   assert.ok(secret, 'got an st_ token (existing JWT still valid post-enroll)');
   const r = await jfetch('/api/devices', auth(secret));
@@ -120,4 +122,26 @@ test('verify lockout: repeated bad codes -> 429 (per-user, atop the route rate-l
     last = await jfetch('/api/auth/totp/verify', post(null, { mfa_token: mfa, code: '000000' }));
   }
   assert.equal(last.status, 429, 'locked out after repeated bad codes');
+});
+
+test('deactivated (SCIM) between the password and the code: /totp/verify issues no session', async () => {
+  const Database = require('better-sqlite3');
+  const sqlite = new Database(path.join(DATA_DIR, 'db', 'remote_display.db'));
+  // Its own client address: the file has already spent this minute's per-IP registrations.
+  const ip = { 'X-Forwarded-For': `10.${crypto.randomInt(256)}.${crypto.randomInt(256)}.${crypto.randomInt(1, 255)}` };
+  try {
+    const email = 'u' + crypto.randomBytes(5).toString('hex') + '@x.local';
+    const reg = await jfetch('/api/auth/register', post(null, { email, password: PW }, ip));
+    const s = await jfetch('/api/auth/totp/setup', post(reg.body.token, {}, ip));
+    const e = await jfetch('/api/auth/totp/enable', post(reg.body.token, { code: authenticator.generate(s.body.secret) }, ip));
+    const recovery = e.body.recovery_codes;
+    const login = await jfetch('/api/auth/login', post(null, { email, password: PW }, ip));
+    assert.equal(login.body.mfa_required, true);
+    sqlite.prepare("UPDATE users SET disabled_at = strftime('%s','now') WHERE email = ?").run(email);
+    const v = await jfetch('/api/auth/totp/verify', post(null, { mfa_token: login.body.mfa_token, code: recovery[0] }, ip));
+    assert.equal(v.status, 403, JSON.stringify(v.body));
+    assert.equal(v.body.code, 'account_disabled');
+    assert.equal(v.body.token, undefined, 'no session is issued');
+    sqlite.prepare('UPDATE users SET disabled_at = NULL WHERE email = ?').run(email);
+  } finally { sqlite.close(); }
 });

@@ -27,12 +27,61 @@ class SessionError extends Error {
 // every request. Callers that don't know the workspace yet (legacy paths,
 // recovery tokens) pass null and the tenancy resolver falls back to the
 // user's first accessible workspace.
-function generateToken(user, currentWorkspaceId) {
+//
+// 3.0: `tv` is the user's token_version at signing time. resolveSessionUser refuses a token whose tv
+// is behind the row, so bumpTokenVersion() (password change/reset, TOTP change, "sign out
+// everywhere") ends every session minted before it. Read from the row when the caller's user object
+// does not carry it - most callers pass a partial row.
+function currentTokenVersion(user) {
+  if (user && Number.isInteger(user.token_version)) return user.token_version;
+  try {
+    const row = db.prepare('SELECT token_version FROM users WHERE id = ?').get(user && user.id);
+    return (row && row.token_version) || 0;
+  } catch { return 0; }
+}
+
+/*
+ * `authTime` (seconds) is when the person last actually SIGNED IN: a password, a passkey or a
+ * single sign-on round trip. Sign-in finishers pass `now`; re-mints of an existing session
+ * (workspace switch, TOTP change, "sign out everywhere else") carry the old value forward so a
+ * re-minted token does not look like a fresh sign-in. Only account deletion reads it today
+ * (lib/account-deletion.js: a password-less account proves it is present by having signed in
+ * within the last few minutes). Absent = unknown = not recent, the safe default.
+ */
+function generateToken(user, currentWorkspaceId, { authTime } = {}) {
   return jwt.sign(
-    { id: user.id, email: user.email, role: user.role, current_workspace_id: currentWorkspaceId || null },
+    { id: user.id, email: user.email, role: user.role, current_workspace_id: currentWorkspaceId || null,
+      tv: currentTokenVersion(user),
+      ...(Number.isInteger(authTime) ? { auth_time: authTime } : {}) },
     config.jwtSecret,
     { algorithm: 'HS256', expiresIn: config.jwtExpiry }
   );
+}
+
+/*
+ * The row a session is checked against. token_version is a 3.0 column that schema-check.js
+ * guarantees at boot; a database without it (a fixture with a hand-built users table, a code-only
+ * rollback-and-forward) is read the 2.x way, as version 0, rather than refusing every session.
+ */
+const SESSION_COLS = 'id, email, name, role, auth_provider, avatar_url, plan_id, email_alerts, must_change_password';
+function loadSessionRow(id) {
+  try {
+    return db.prepare(`SELECT ${SESSION_COLS}, token_version, disabled_at FROM users WHERE id = ?`).get(id);
+  } catch (e) {
+    // disabled_at (3.0, SCIM) is guaranteed by schema-check.js like token_version; read the 2.x
+    // shape only when one of the two is genuinely absent.
+    if (!/no such column: (token_version|disabled_at)/i.test(e.message)) throw e;
+    return db.prepare(`SELECT ${SESSION_COLS} FROM users WHERE id = ?`).get(id);
+  }
+}
+
+/** End every session this user holds (each one is re-checked against the row on every request). */
+function bumpTokenVersion(userId) {
+  try {
+    db.prepare('UPDATE users SET token_version = token_version + 1 WHERE id = ?').run(userId);
+  } catch (e) {
+    if (!/no such column: token_version/i.test(e.message)) throw e;
+  }
 }
 
 // #100: issued after password verification but BEFORE the TOTP step, so the client
@@ -148,8 +197,20 @@ function resolveSessionUser(token, { allowPasswordChange = false, sourceIp = nul
     return { user: support.supportUser(decoded), decoded, viaRecovery: false, viaSupport: true };
   }
   if (decoded.mfa_pending) throw new SessionError('mfa_required');
-  const user = db.prepare('SELECT id, email, name, role, auth_provider, avatar_url, plan_id, email_alerts, must_change_password FROM users WHERE id = ?').get(decoded.id);
+  const user = loadSessionRow(decoded.id);
   if (!user) throw new SessionError('user_not_found');
+  // 3.0: a token minted before the last bumpTokenVersion() is over. A 2.x token has no tv: 0.
+  if ((Number.isInteger(decoded.tv) ? decoded.tv : 0) < (user.token_version || 0)) {
+    throw new SessionError('session_revoked');
+  }
+  /*
+   * 3.0: an account its organization's identity provider deactivated (SCIM, lib/scim/provision.js).
+   * Deactivation also bumps token_version, so this is the belt for a token minted in the moment
+   * between the two writes, and for any path that mints a session without going through a login.
+   */
+  if (user.disabled_at) throw new SessionError('account_disabled');
+  delete user.token_version; // req.user's shape is unchanged
+  delete user.disabled_at;
   if (user.must_change_password && !allowPasswordChange) {
     throw new SessionError('password_change_required');
   }
@@ -195,6 +256,11 @@ function requireAuth(req, res, next) {
     return res.status(401).json({ error: 'Invalid or expired token' });
   }
   req.user = session.user;
+  // When this session's person last signed in (see generateToken). Undefined on older tokens and on
+  // recovery/support sessions, which never count as a recent sign-in.
+  req.authTime = (session.viaRecovery || session.viaSupport || !Number.isInteger(session.decoded.auth_time))
+    ? undefined : session.decoded.auth_time;
+  req.sessionKind = session.viaRecovery ? 'recovery' : (session.viaSupport ? 'support' : 'user');
   // Tenancy middleware reads this on the resolver step.
   req.jwtWorkspaceId = (session.viaRecovery || session.viaSupport) ? null : (session.decoded.current_workspace_id || null);
   next();
@@ -262,4 +328,4 @@ function requireSuperAdmin(req, res, next) {
 // Preferred alias for new code.
 const requirePlatformAdmin = requireSuperAdmin;
 
-module.exports = { wwwAuthenticate, generateToken, generateMfaPendingToken, generateSupportSessionToken, verifyToken, verifyMfaPendingToken, resolveSessionUser, SessionError, MFA_TOKEN_AUDIENCE, requireAuth, requireAdmin, requireSuperAdmin, requirePlatformAdmin, isPlatformRole, isPlatformStaff, PLATFORM_ROLES, PLATFORM_STAFF, ELEVATED_ROLES };
+module.exports = { wwwAuthenticate, generateToken, bumpTokenVersion, generateMfaPendingToken, generateSupportSessionToken, verifyToken, verifyMfaPendingToken, resolveSessionUser, SessionError, MFA_TOKEN_AUDIENCE, requireAuth, requireAdmin, requireSuperAdmin, requirePlatformAdmin, isPlatformRole, isPlatformStaff, PLATFORM_ROLES, PLATFORM_STAFF, ELEVATED_ROLES };

@@ -4,6 +4,7 @@ import { showToast } from '../components/toast.js';
 import { esc, hydrateAuthImages } from '../utils.js';
 import { t } from '../i18n.js';
 import { openHistoryModal } from '../components/history-modal.js';
+import { generateCaptions, openCaptionsEditor } from '../components/captions.js';
 import { isPdf, renderPdfToPages, baseName } from '../components/pdf-pages.js';
 import { reportConnectResult, loadCanvaLinks, syncCanvaLink, openCanvaPicker } from '../components/canva-import.js';
 import { openDialog, confirmDialog } from '../components/library/dialog.js';
@@ -243,6 +244,10 @@ export function render(container) {
     handleFiles(files, destination());
   });
   document.getElementById('libAddBtn').addEventListener('click', () => openAdd());
+
+  // #/content?open=<id> opens that item in the inspector (the Freshness page's "Replace" lands here).
+  const openParam = new URLSearchParams(window.location.hash.split('?')[1] || '').get('open');
+  if (openParam && /^[\w-]{1,64}$/.test(openParam)) state.openId = openParam;
 
   renderNav();
   renderChrome();
@@ -1014,7 +1019,8 @@ async function playlistDialog(items) {
         });
         rd.root.querySelector('[data-ok]').addEventListener('click', () => rd.close());
       } else {
-        showToast(t('library.playlist.done', { count: added, playlist: pl.name }), 'success');
+        // #632: this leaves the playlist with unpublished changes, and nothing here shows that.
+        showToast(t('library.playlist.done_draft', { count: added, playlist: pl.name }), 'success', 7000);
       }
       afterBulk(items.length > 1);
     } catch (err) {
@@ -1318,6 +1324,21 @@ function showEditModal(contentItem, onSave, { focus = null } = {}) {
           </div>
           ${contentItem.subtitle_url ? `<label style="display:flex;align-items:center;gap:8px;cursor:pointer;margin-top:8px"><input type="checkbox" id="editSubtitleRemove" style="width:auto;margin:0"><span>${t('content.subtitle_remove')}</span></label>` : ''}
           <p style="font-size:11px;color:var(--text-muted);margin-top:4px">${t('content.subtitle_hint')}</p>
+          <div class="a11y-cap-row" style="display:flex;gap:8px;flex-wrap:wrap;margin-top:8px">
+            <button type="button" class="btn btn-secondary btn-sm" id="editGenCaptions" hidden>${esc(t('a11y.act.generate_captions'))}</button>
+            ${contentItem.subtitle_url ? `<button type="button" class="btn btn-secondary btn-sm" id="editEditCaptions">${esc(t('a11y.act.edit_captions'))}</button>` : ''}
+          </div>
+          <p id="editCaptionsNote" style="font-size:11px;color:var(--text-muted);margin-top:4px" hidden></p>
+        </div>
+        ` : ''}
+        ${isUploadedVideo ? `
+        <div class="form-group">
+          <label style="display:flex;align-items:center;gap:8px;cursor:pointer">
+            <input type="checkbox" id="editVideoPrerotated" ${contentItem.video_prerotated ? 'checked' : ''} style="width:auto;margin:0">
+            <span>${esc(t('content.tvsafe.prerotated'))}</span>
+          </label>
+          <p style="font-size:11px;color:var(--text-muted);margin-top:4px">${esc(t('content.tvsafe.prerotated_hint'))}</p>
+          <div id="editTvCopies" style="font-size:12px;color:var(--text-secondary);margin-top:8px" hidden></div>
         </div>
         ` : ''}
         ${!isRemote ? `
@@ -1350,6 +1371,53 @@ function showEditModal(contentItem, onSave, { focus = null } = {}) {
   overlay.querySelector('#closeEditModal').onclick = () => closeEdit();
   overlay.querySelector('#cancelEditBtn').onclick = () => closeEdit();
   overlay.onclick = (e) => { if (e.target === overlay) closeEdit(); };
+
+  // 3.0 accessibility: "Generate captions" (only when the workspace has a speech-to-text endpoint;
+  // otherwise one sentence says why it is not offered) and "Edit captions".
+  const genBtn = overlay.querySelector('#editGenCaptions');
+  if (genBtn) {
+    api.getCaptionsJob(contentItem.id).then((st) => {
+      if (!document.contains(genBtn) || !st || Array.isArray(st)) return;
+      const note = overlay.querySelector('#editCaptionsNote');
+      if (st.stt_configured) genBtn.hidden = false;
+      else { note.textContent = t('a11y.captions.not_set'); note.hidden = false; }
+      if (st.job && st.job.status === 'running') { genBtn.disabled = true; genBtn.textContent = t('a11y.captions.working'); }
+    }).catch(() => {});
+    genBtn.addEventListener('click', async () => {
+      genBtn.disabled = true;
+      genBtn.textContent = t('a11y.captions.working');
+      const lang = overlay.querySelector('#editSubtitleLang')?.value;
+      const ok = await generateCaptions(contentItem.id, () => {}, lang);
+      if (!document.contains(genBtn)) return;
+      genBtn.disabled = false;
+      genBtn.textContent = t('a11y.act.generate_captions');
+      if (ok) { closeEdit(); openCaptionsEditor(contentItem.id); }
+    });
+  }
+  overlay.querySelector('#editEditCaptions')?.addEventListener('click', () => openCaptionsEditor(contentItem.id));
+
+  // 3.0 TV-safe video copies (server/lib/video-variants.js): for a tall video, say whether the copy
+  // a Samsung TV plays is being prepared, ready or failed — and offer Retry on failure.
+  const tvEl = overlay.querySelector('#editTvCopies');
+  const renderTvCopies = (st) => {
+    if (!tvEl || !document.contains(tvEl) || !st || !st.tall) { if (tvEl) tvEl.hidden = true; return; }
+    const copies = st.copies || [];
+    let line;
+    if (!st.enabled) line = t('content.tvsafe.off');
+    else if (!copies.length && !(st.needs || []).length) line = t('content.tvsafe.not_needed');
+    else if (copies.some((c) => c.status === 'failed' || c.status === 'denied')) {
+      line = copies.some((c) => c.status === 'denied') ? t('content.tvsafe.allowance') : t('content.tvsafe.failed');
+    } else if (copies.length && copies.every((c) => c.status === 'ready')) line = t('content.tvsafe.ready');
+    else line = t('content.tvsafe.preparing');
+    const retry = copies.some((c) => c.status === 'failed' || c.status === 'denied');
+    tvEl.innerHTML = `<strong>${esc(t('content.tvsafe.title'))}</strong> ${esc(line)}${retry ? ` <button type="button" class="btn btn-secondary btn-sm" id="editTvRetry">${esc(t('content.tvsafe.retry'))}</button>` : ''}`;
+    tvEl.hidden = false;
+    overlay.querySelector('#editTvRetry')?.addEventListener('click', async (e) => {
+      e.target.disabled = true;
+      try { renderTvCopies(await api.retryContentTvCopies(contentItem.id)); } catch (err) { showToast(err.message, 'error'); e.target.disabled = false; }
+    });
+  };
+  if (tvEl) api.getContentTvCopies(contentItem.id).then(renderTvCopies).catch(() => {});
 
   overlay.querySelector('#saveEditBtn').onclick = async () => {
     const filename = overlay.querySelector('#editFilename').value.trim();
@@ -1388,6 +1456,12 @@ function showEditModal(contentItem, onSave, { focus = null } = {}) {
       if (unstableEl) {
         const newUnstable = unstableEl.checked ? 1 : 0;
         if (newUnstable !== (contentItem.unstable_connection ? 1 : 0)) updateData.unstable_connection = newUnstable;
+      }
+      // 3.0 TV-safe video: "already rotated for portrait screens".
+      const prerotEl = overlay.querySelector('#editVideoPrerotated');
+      if (prerotEl) {
+        const v = prerotEl.checked ? 1 : 0;
+        if (v !== (contentItem.video_prerotated ? 1 : 0)) updateData.video_prerotated = v;
       }
       // #216: YouTube captions (checkbox + language).
       const captionsEl = overlay.querySelector('#editCaptionsEnabled');

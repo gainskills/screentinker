@@ -37,10 +37,16 @@ const WORKSPACE_SCOPED = [
   'playlists', 'schedules', 'video_walls', 'device_groups', 'devices',
   'content', 'layouts', 'widgets', 'content_folders', 'kiosk_pages',
   'white_labels', 'alert_configs',
+  // 3.0 site cache: a deleted workspace's cache boxes stop being able to sign in (their token_hash
+  // goes) and their assignments cascade with them.
+  'site_caches',
+  // 3.0 switch to ScreenTinker (lib/migrate): a deleted workspace's import jobs (and any source
+  // credential still held for one), its idempotency map and its unpaired placeholders.
+  'migration_jobs', 'migration_items', 'migration_screens',
 ];
 // Logs that carry a device_id but NO foreign key (so they don't block, but we
 // clean them to avoid dangling rows).
-const DEVICE_LOG_TABLES = ['device_status_log', 'player_debug_logs', 'audience_buckets', 'audience_ingested', 'automation_device_state'];
+const DEVICE_LOG_TABLES = ['device_status_log', 'player_debug_logs', 'device_diagnostic_logs', 'audience_buckets', 'audience_ingested', 'automation_device_state'];
 // Nullable creator/inviter columns -> SET NULL (preserve the resource).
 const NULLABLE_USER_REFS = [
   ['content', 'user_id'], ['devices', 'user_id'], ['layouts', 'user_id'], ['widgets', 'user_id'],
@@ -49,6 +55,7 @@ const NULLABLE_USER_REFS = [
   ['activity_log', 'user_id'], ['activity_log', 'acting_user_id'],
   ['cap_feeds', 'user_id'], ['automation_hooks', 'created_by'], ['social_feeds', 'created_by'],
   ['social_connections', 'created_by'], ['bi_connections', 'created_by'], ['canva_integrations', 'updated_by'],
+  ['migration_jobs', 'user_id'],
 ];
 // NOT NULL legacy creator columns on workspace-scoped resources -> reassign to
 // the resource's org owner (fallback: the acting admin) so the row survives.
@@ -359,6 +366,9 @@ function deleteUserCascade(db, { targetId, actingAdminId, unlink, revokeCanva })
     );
   }
   const soloOrgIds = owned.map(o => o.id);
+  // Who inherits a NOT NULL creator column nobody else can take (2b below). Never the person being
+  // deleted: a self-service delete passes their own id as the actor, or null.
+  const fallbackId = actingAdminId && actingAdminId !== targetId ? actingAdminId : null;
 
   const have = tablesPresent(db);
   // Their own Canva connections (encrypted OAuth tokens), and any made against a solo org's app.
@@ -389,23 +399,31 @@ function deleteUserCascade(db, { targetId, actingAdminId, unlink, revokeCanva })
 
     // 2b) NOT NULL legacy creator columns -> reassign to the resource's org owner
     //     (fallback acting admin), preserving the resource under a valid owner.
+    //     Self-service deletion (routes/auth.js DELETE /me) has no admin acting: the caller passes
+    //     another platform admin as the fallback, or null when there is none, and then a row that
+    //     belongs to no organization (a pre-tenancy legacy row only its creator could ever reach)
+    //     goes with its creator - reassigning it to the person being deleted would fail the
+    //     foreign key at COMMIT.
     for (const t of REASSIGN_USER_TABLES) {
       if (!have.has(t)) continue;
-      db.prepare(`
-        UPDATE ${t} SET user_id = COALESCE(
-          (SELECT o.owner_user_id FROM workspaces w JOIN organizations o ON o.id = w.organization_id WHERE w.id = ${t}.workspace_id),
-          ?
-        ) WHERE user_id = ?
-      `).run(actingAdminId, targetId);
+      const owner = `(SELECT o.owner_user_id FROM workspaces w JOIN organizations o ON o.id = w.organization_id WHERE w.id = ${t}.workspace_id)`;
+      if (fallbackId) {
+        db.prepare(`UPDATE ${t} SET user_id = COALESCE(${owner}, ?) WHERE user_id = ?`).run(fallbackId, targetId);
+      } else {
+        db.prepare(`UPDATE ${t} SET user_id = ${owner} WHERE user_id = ? AND ${owner} IS NOT NULL`).run(targetId);
+        db.prepare(`DELETE FROM ${t} WHERE user_id = ?`).run(targetId);
+      }
     }
     for (const t of REASSIGN_WORKSPACE_ONLY_TABLES) {
       if (!have.has(t)) continue;
+      // Without a fallback, a folder whose workspace has no owner is left on the person and goes
+      // with them (the column cascades), like a workspace-less one.
       db.prepare(`
         UPDATE ${t} SET user_id = COALESCE(
           (SELECT o.owner_user_id FROM workspaces w JOIN organizations o ON o.id = w.organization_id WHERE w.id = ${t}.workspace_id),
           ?
         ) WHERE user_id = ? AND workspace_id IS NOT NULL
-      `).run(actingAdminId, targetId);
+      `).run(fallbackId || targetId, targetId);
     }
 
     // 2b') Integrations that act AS the person (#520-#523). These stop working without them, so they
@@ -420,6 +438,11 @@ function deleteUserCascade(db, { targetId, actingAdminId, unlink, revokeCanva })
     if (have.has('canva_connections')) db.prepare('DELETE FROM canva_connections WHERE user_id = ?').run(targetId);
     if (have.has('canva_links')) db.prepare('DELETE FROM canva_links WHERE user_id = ?').run(targetId);
     if (have.has('canva_jobs')) db.prepare('DELETE FROM canva_jobs WHERE user_id = ?').run(targetId);
+    // 3.0 funnel rows (lib/conversion-events.js): no foreign key, so nothing else would remove them.
+    if (have.has('conversion_events')) db.prepare('DELETE FROM conversion_events WHERE user_id = ?').run(targetId);
+    // 3.0 passkeys: declared ON DELETE CASCADE, deleted here too so it holds whatever the pragma.
+    if (have.has('webauthn_credentials')) db.prepare('DELETE FROM webauthn_credentials WHERE user_id = ?').run(targetId);
+    if (have.has('webauthn_challenges')) db.prepare('DELETE FROM webauthn_challenges WHERE user_id = ?').run(targetId);
     if (have.has('cloud_folders')) {
       db.prepare(`UPDATE cloud_folders SET user_id = NULL, enabled = 0, last_status = 'error',
           last_error = 'Paused: the person who set up this folder no longer has an account.',
@@ -445,6 +468,10 @@ function deleteUserCascade(db, { targetId, actingAdminId, unlink, revokeCanva })
 
   run();
   afterCommit(side, revokeCanva);
+  // ⚠️ A deleted user's open dashboards authenticated at their handshake; close them so they stop
+  // receiving live device events at once (writes are re-checked anyway). Lazy: avoids loading the
+  // socket stack from a lib module, and a no-op where no socket server runs (scripts, tests).
+  try { require('../ws/dashboardSocket').disconnectUserSockets(targetId); } catch (_) { /* best-effort */ }
   return removeDeletedFiles(gone, unlink);
 }
 

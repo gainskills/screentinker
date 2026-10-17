@@ -194,7 +194,13 @@ fi
 SUDO=""; [ "$(id -u)" != 0 ] && SUDO="sudo"
 # ⚠️ apt NEVER READS THE TERMINAL. Left attached it swallowed the keystroke meant for the next
 # prompt (which then waited for ever), and dpkg can stop on a config-file question mid-upgrade.
-apt_get() { $SUDO env DEBIAN_FRONTEND=noninteractive apt-get "$@" < /dev/null; }
+# ⚠️ NEEDRESTART MUST NOT RESTART THE SERVER MID-UPGRADE. On Debian/Ubuntu, apt's needrestart hook
+# restarts every service whose binary apt just replaced. Installing Node 22 restarted ScreenTinker
+# while this script was still checking out and installing: the half-installed server's dependency
+# preflight then ran its own npm alongside our `npm ci`, and the two left files out of node_modules
+# (prod, 2026-10-15: stripe and apache-arrow, so billing broke). List-only mode, and suspended for
+# this apt run. The restart at the end of this script is the one that is meant to happen.
+apt_get() { $SUDO env DEBIAN_FRONTEND=noninteractive NEEDRESTART_MODE=l NEEDRESTART_SUSPEND=1 apt-get "$@" < /dev/null; }
 confirm() { # question
   [ "${ST_AUTO_INSTALL_PREREQS:-0}" = "1" ] && { echo "    $1 yes (ST_AUTO_INSTALL_PREREQS=1)"; return 0; }
   [ -t 0 ] && [ -r /dev/tty ] || return 1
@@ -250,6 +256,14 @@ node_ok() { [ -z "$NODE_FLOOR" ] || [ "$(printf '%s\n%s\n' "$NODE_FLOOR" "$(node
 #
 # Upgrading Node first is safe for the release being left: 2.6.x runs on Node 22 too, so a rollback
 # after this point still has a server that starts.
+# While this script changes Node or node_modules, anything that starts the server anyway (needrestart
+# on an apt we did not run, a crash restart, an operator) must not run npm too. The marker tells
+# the server's dependency preflight that an upgrade owns node_modules (server/lib/preflight-deps.js);
+# it holds the start instead, and this script's own restart comes after the install is finished.
+UPGRADE_MARKER="$APP_DIR/server/.upgrade-in-progress"
+printf '%s %s %s\n' "$$" "$(date +%s)" "$TARGET" > "$UPGRADE_MARKER" 2>/dev/null || UPGRADE_MARKER=""
+trap '[ -n "${UPGRADE_MARKER:-}" ] && rm -f "$UPGRADE_MARKER"' EXIT
+
 STEP="checking the Node version $TARGET needs"
 TARGET_PKG="$(git show "$TARGET:server/package.json" 2>/dev/null || true)"
 NODE_FLOOR="$(printf '%s' "$TARGET_PKG" | sed -n 's/.*"node": *">= *v\{0,1\}\([0-9][0-9.]*\)".*/\1/p' | head -1)"
@@ -268,6 +282,29 @@ if ! node_ok; then
       record refused "needs Node >= $NODE_FLOOR, host has $NODE_HAVE"
       trap - ERR; exit 1
     fi
+  fi
+fi
+
+# ⚠️ THE NODE ON PATH IS NOT NECESSARILY THE NODE THE SERVICE RUNS. A unit with an nvm path in
+# ExecStart (the 2.x remotedisplay.service template shipped one for Node 20) passed every check
+# above on a host whose PATH node was 22, then restarted onto Node 20 and stopped at boot. Ask the
+# unit which binary it starts and hold THAT to the floor too. (Since 3.0 the server refuses to start
+# below the floor with exit 78 rather than crash-looping, so this is the friendlier, earlier copy.)
+service_node() {
+  command -v systemctl >/dev/null 2>&1 || return 0
+  systemctl cat "$SERVICE_NAME" >/dev/null 2>&1 || return 0
+  systemctl show -p ExecStart --value "$SERVICE_NAME" 2>/dev/null | sed -n 's/.*path=\([^ ;]*\).*/\1/p' | head -1
+}
+SVC_NODE="$(service_node)"
+if [ -n "$SVC_NODE" ] && [ -n "$NODE_FLOOR" ] && [ "$(basename "$SVC_NODE")" = "node" ] && [ "${ST_ALLOW_OLD_NODE:-0}" != "1" ]; then
+  STEP="checking the Node the $SERVICE_NAME service runs"
+  SVC_HAVE="$("$SVC_NODE" -p 'process.versions.node' 2>/dev/null || echo none)"
+  if [ "$(printf '%s\n%s\n' "$NODE_FLOOR" "$SVC_HAVE" | sort -V | head -1)" != "$NODE_FLOOR" ]; then
+    echo "ERROR: the $SERVICE_NAME service starts $SVC_NODE (Node $SVC_HAVE), but $TARGET needs Node >= $NODE_FLOOR." >&2
+    echo "       Point ExecStart at a Node >= $NODE_FLOOR (e.g. $(command -v node 2>/dev/null || echo /usr/bin/node), which is $(node -v 2>/dev/null || echo missing))" >&2
+    echo "       with 'sudo systemctl edit --full $SERVICE_NAME', then run this script again." >&2
+    record refused "service $SERVICE_NAME runs $SVC_NODE (Node $SVC_HAVE), needs >= $NODE_FLOOR"
+    trap - ERR; exit 1
   fi
 fi
 
@@ -324,6 +361,95 @@ if [ "$NATIVE_DRIVER" = 1 ]; then
   echo "==> Database driver loads"
 fi
 
+# #634: build the native Raspberry Pi player for the release just checked out, so /download/pi
+# serves it. The .deb is not in git (native/dist/ is ignored), so a git install never had one and
+# `raspberry-pi-setup.sh --native` got a 404. Best effort: the server runs fine without it.
+STEP="building the Raspberry Pi player package"
+if command -v dpkg-deb >/dev/null 2>&1 && command -v rsync >/dev/null 2>&1; then
+  if PI_DEB="$(native/packaging/linux/build-deb.sh 2>&1 | tail -1)" && [ -s "$PI_DEB" ]; then
+    echo "==> Raspberry Pi player package: ${PI_DEB#"$PWD"/}"
+  else
+    echo "WARNING: could not build the Raspberry Pi player package; /download/pi will not offer it." >&2
+  fi
+else
+  echo "NOTE: dpkg-deb or rsync is missing, so the Raspberry Pi player package was not built (/download/pi)." >&2
+fi
+
+# #634: the player packages the release carries (the signed Android APK and its version sidecar, the
+# webOS .ipk, the Tizen .wgt, and the Windows/macOS/Pi installers when attached), into the places the
+# server serves them from: the checkout root, as in the release tarball, and native/dist/. Before,
+# only a tarball install had them, and everyone else copied them in by hand.
+#   - Each file is checked against the SHA-256 the release publishes, then moved into place; a file
+#     it replaces is kept beside it as <name>.bak-pre-<tag>.
+#   - The APK and its .version move together: a sidecar newer than the APK puts screens in a
+#     reinstall loop, so the sidecar is only written when the APK is.
+#   - A copy an operator keeps in DATA_DIR still wins (it is searched first), so a pinned APK stays.
+#   - UPGRADE_SKIP_PLAYERS=1 leaves every package as it is (e.g. to stage the APK by hand).
+#   - Best effort: no network, no release, or a bad file warns and never fails the upgrade.
+fetch_players() {
+  local repo json list name dest digest url tmp apk_state=none
+  repo="${UPGRADE_RELEASE_REPO:-$(git remote get-url origin 2>/dev/null \
+    | sed -nE 's#^(https://github\.com/|git@github\.com:)##p' | sed -E 's#/$##; s#\.git$##' \
+    | grep -E '^[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+$' || true)}"
+  repo="${repo:-screentinker/screentinker}"
+  json="$(curl -fsSL --retry 2 -H 'Accept: application/vnd.github+json' \
+    "https://api.github.com/repos/$repo/releases/tags/$TARGET")" || { echo "WARNING: could not read release $TARGET from $repo" >&2; return 0; }
+  # name<TAB>destination<TAB>sha256:digest<TAB>url, the APK first so its sidecar can follow it.
+  list="$(printf '%s' "$json" | node -e '
+    let s = ""; process.stdin.on("data", (d) => (s += d)).on("end", () => {
+      const root = new Set(["ScreenTinker.apk", "ScreenTinker.apk.version", "ScreenTinker.ipk", "ScreenTinker.wgt"]);
+      const dist = /^(screentinker-pi_[^/]+_all\.deb|ScreenTinker-Setup-[^/]+\.exe|ScreenTinker-[^/]+\.dmg)$/;
+      const rank = (n) => (n === "ScreenTinker.apk" ? 0 : n === "ScreenTinker.apk.version" ? 1 : 2);
+      const out = (JSON.parse(s).assets || [])
+        .filter((a) => /^sha256:[0-9a-f]{64}$/.test(a.digest || "") && (root.has(a.name) || dist.test(a.name)))
+        .sort((a, b) => rank(a.name) - rank(b.name))
+        .map((a) => [a.name, root.has(a.name) ? a.name : "native/dist/" + a.name, a.digest, a.browser_download_url].join("\t"));
+      process.stdout.write(out.join("\n"));
+    });')" || { echo "WARNING: could not read the asset list of $TARGET" >&2; return 0; }
+  if [ -z "$list" ]; then echo "==> Player packages: none attached to $TARGET yet"; return 0; fi
+  echo "==> Player packages from $repo $TARGET"
+  while IFS=$'\t' read -r name dest digest url; do
+    if [ "$name" = ScreenTinker.apk.version ] && [ "$apk_state" = failed ]; then
+      echo "    $name: kept, because the APK was not replaced" >&2; continue
+    fi
+    # The Pi package built above is the same release; keep it rather than swap it for a download.
+    case "$name" in *.deb) [ -s "$dest" ] && { echo "    $name: built above"; continue; } ;; esac
+    if ! mkdir -p "$(dirname "$dest")"; then
+      echo "WARNING: cannot write $(dirname "$dest"); $name not updated" >&2
+      [ "$name" = ScreenTinker.apk ] && apk_state=failed; continue
+    fi
+    tmp="$dest.new"
+    if ! curl -fsSL --retry 3 -o "$tmp" "$url"; then
+      rm -f "$tmp"; echo "WARNING: could not download $name; kept the current one" >&2
+      [ "$name" = ScreenTinker.apk ] && apk_state=failed; continue
+    fi
+    if [ "sha256:$(sha256sum "$tmp" | cut -d' ' -f1)" != "$digest" ]; then
+      rm -f "$tmp"; echo "WARNING: $name does not match the release checksum; kept the current one" >&2
+      [ "$name" = ScreenTinker.apk ] && apk_state=failed; continue
+    fi
+    if [ -f "$dest" ] && cmp -s "$tmp" "$dest"; then
+      rm -f "$tmp"; echo "    $name: already current"; continue
+    fi
+    if [ -f "$dest" ] && ! cp -p "$dest" "$dest.bak-pre-$TARGET"; then
+      rm -f "$tmp"; echo "WARNING: could not back up $dest; $name not updated" >&2
+      [ "$name" = ScreenTinker.apk ] && apk_state=failed; continue
+    fi
+    if ! mv -f "$tmp" "$dest"; then
+      rm -f "$tmp"; echo "WARNING: could not put $name in place; kept the current one" >&2
+      [ "$name" = ScreenTinker.apk ] && apk_state=failed; continue
+    fi
+    echo "    $name -> $dest"
+  done <<< "$list"
+}
+STEP="downloading the player packages for $TARGET"
+if [ "${UPGRADE_SKIP_PLAYERS:-0}" = 1 ]; then
+  echo "==> Player packages: left as they are (UPGRADE_SKIP_PLAYERS=1)"
+elif ! command -v curl >/dev/null 2>&1 || ! command -v sha256sum >/dev/null 2>&1; then
+  echo "NOTE: curl or sha256sum is missing, so the player packages for $TARGET were not downloaded." >&2
+else
+  fetch_players
+fi
+
 # ⚠️ NOT EVERY INSTALL IS A SYSTEMD UNIT CALLED screentinker. The README's quick start is
 # `npm start`, and people put that under pm2; a hard-coded `systemctl restart` then failed at the
 # very end, leaving the new code on disk and the old process serving it. Find how this server is
@@ -339,6 +465,9 @@ pm2_id_for_checkout() {
       if (p) process.stdout.write(String(p.pm_id));
     });' || true
 }
+
+# node_modules is final: the restart below, and any other start from here on, may run the preflight.
+[ -n "${UPGRADE_MARKER:-}" ] && rm -f "$UPGRADE_MARKER"
 
 STEP="restarting the server"
 RESTARTED="" LOGS_HINT="the server's log"

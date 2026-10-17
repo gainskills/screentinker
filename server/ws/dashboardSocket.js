@@ -2,7 +2,7 @@ const heartbeat = require('../services/heartbeat');
 const { resolveSessionUser, isPlatformRole } = require('../middleware/auth');
 const { db } = require('../db/database');
 const { accessContext, accessibleWorkspaceIds } = require('../lib/tenancy');
-const { roomsForDashboard } = require('../lib/socket-rooms');
+const { roomsForDashboard, deviceRoom } = require('../lib/socket-rooms');
 const { protectSocket } = require('../lib/safe-socket');
 const playerCapabilities = require('../lib/player-capabilities');
 const { ALLOWED_COMMANDS, deliverCommand, validateCommand } = require('../lib/device-command');
@@ -37,7 +37,39 @@ function socketActor(socket) {
   return corpActor.fromUser({ id: socket.userId, role: socket.userRole });
 }
 
+/*
+ * ⚠️ RE-RESOLVE THE SESSION BEFORE A WRITE. The handshake resolved the user once and cached the
+ * role on the socket, so a user deleted, logged out everywhere (token_version), demoted from
+ * platform staff, or a support session whose grant was revoked kept fleet control (commands, PTY,
+ * remote input) for as long as the tab stayed open. Re-running the same resolver as requireAuth is
+ * one HMAC + one indexed lookup, cheap enough per write action; reads stay on the cached identity.
+ * A session that no longer resolves is disconnected, not just refused — its rooms are stale too.
+ */
+function revalidateSocket(socket) {
+  const token = socket.handshake && socket.handshake.auth && socket.handshake.auth.token;
+  let session = null;
+  try { session = token ? resolveSessionUser(token) : null; } catch (_) { session = null; }
+  if (!session || session.viaRecovery || !session.user || session.user.id !== socket.userId) {
+    try { socket.disconnect(true); } catch (_) { /* already gone */ }
+    return false;
+  }
+  socket.userRole = session.user.role;
+  return true;
+}
+
+// Write tier on a whole workspace (the scope of a group or workspace talk broadcast).
+function canWriteWorkspace(socket, workspaceId) {
+  if (!workspaceId) return false;
+  if (!revalidateSocket(socket)) return false;
+  const ws = db.prepare('SELECT * FROM workspaces WHERE id = ?').get(workspaceId);
+  if (!ws) return false;
+  const ctx = accessContext(socket.userId, socket.userRole, ws);
+  if (!ctx) return false;
+  return ctx.actingAs || ctx.workspaceRole === 'workspace_editor' || ctx.workspaceRole === 'workspace_admin';
+}
+
 function canActOnDevice(socket, deviceId, tier /* 'read' | 'write' */) {
+  if (tier !== 'read' && !revalidateSocket(socket)) return false;
   const device = db.prepare('SELECT workspace_id FROM devices WHERE id = ?').get(deviceId);
   if (!device || !device.workspace_id) return false;
   const ws = db.prepare('SELECT * FROM workspaces WHERE id = ?').get(device.workspace_id);
@@ -50,8 +82,13 @@ function canActOnDevice(socket, deviceId, tier /* 'read' | 'write' */) {
   return ctx.workspaceRole === 'workspace_editor' || ctx.workspaceRole === 'workspace_admin';
 }
 
+// The /dashboard namespace once setupDashboardSocket has run (null before, e.g. in unit tests).
+let _dashboardNs = null;
+function userRoom(userId) { return `user-sock:${userId}`; }
+
 module.exports = function setupDashboardSocket(io) {
   const dashboardNs = io.of('/dashboard');
+  _dashboardNs = dashboardNs;
   const deviceNs = io.of('/device');
   /*
    * The PTY relay authorises an open with EXACTLY the gate a `shell` command passes through below:
@@ -89,6 +126,9 @@ module.exports = function setupDashboardSocket(io) {
     // Role + existence come from the LIVE users row, not the token claim: a deleted or
     // demoted user no longer keeps fleet control for the remainder of a 7-day JWT.
     socket.userRole = session.user.role;
+    // The workspace this session is in (the token's claim). Rooms are joined for it alone; see
+    // roomsForDashboard. Support sessions carry none and keep every accessible workspace.
+    socket.currentWorkspaceId = (!session.viaSupport && session.decoded && session.decoded.current_workspace_id) || null;
     next();
   });
 
@@ -104,8 +144,11 @@ module.exports = function setupDashboardSocket(io) {
     // that has registered but not yet been paired reach the one operator allowed to see it,
     // instead of being dropped for want of a room. See lib/socket-rooms UNCLAIMED_ROOM.
     const wsIds = accessibleWorkspaceIds(socket.userId, socket.userRole);
-    const rooms = roomsForDashboard(wsIds, isPlatformRole(socket.userRole));
+    const rooms = roomsForDashboard(wsIds, isPlatformRole(socket.userRole), socket.currentWorkspaceId);
     for (const room of rooms) socket.join(room);
+    // Per-user room, used ONLY to find this user's sockets for disconnectUserSockets — nothing is
+    // ever emitted to it.
+    socket.join(userRoom(socket.userId));
     console.log(`Dashboard client connected: ${socket.id} (user: ${socket.userId}, rooms: ${rooms.length})`);
 
     /*
@@ -131,6 +174,22 @@ module.exports = function setupDashboardSocket(io) {
       if (typeof ack === 'function') ack({ delivered: false, reason: 'unsupported', capability: cap });
       return true;
     }
+
+    /*
+     * A page showing a device outside the current workspace (a platform admin or org admin acting
+     * as, opening a device detail link) asks for that device's room, so its screenshots, logs and
+     * status keep arriving. The same read gate the commands use: a socket can only ever watch what
+     * the HTTP API would already let it open. Unclaimed devices resolve to UNCLAIMED_ROOM, which
+     * platform roles have joined already.
+     */
+    socket.on('dashboard:watch-device', (data, ack) => {
+      const reply = typeof ack === 'function' ? ack : () => {};
+      const deviceId = data && typeof data.device_id === 'string' ? data.device_id : null;
+      if (!deviceId || !canActOnDevice(socket, deviceId, 'read')) return reply({ ok: false });
+      const room = deviceRoom(deviceId);
+      if (room && !socket.rooms.has(room)) socket.join(room);
+      reply({ ok: true, room: !!room });
+    });
 
     socket.on('dashboard:request-screenshot', (data, ack) => {
       const { device_id } = data;
@@ -321,6 +380,15 @@ module.exports = function setupDashboardSocket(io) {
       const kind = data && data.scope && data.scope.kind;
       const id = data && data.scope && data.scope.id;
       if ((kind !== 'group' && kind !== 'workspace') || !id) return;
+      // ⚠️ Deleting the shared broadcast stream cuts EVERY listener off, so it needs write access to
+      // the scope itself — as publishing to it does (requireGroupWrite / the workspace talk route).
+      // It used to run for any {kind,id}, letting any dashboard user end another tenant's broadcast.
+      let scopeWs = null;
+      try {
+        scopeWs = kind === 'workspace' ? id
+          : (db.prepare('SELECT workspace_id FROM device_groups WHERE id = ?').get(id) || {}).workspace_id || null;
+      } catch (_) { scopeWs = null; }
+      if (!canWriteWorkspace(socket, scopeWs)) return;
       for (const d of scopeDevices(kind, id)) {
         if (canActOnDevice(socket, d.id, 'write')) deviceNs.to(d.id).emit('device:talk-stop', {});
       }
@@ -413,6 +481,10 @@ module.exports = function setupDashboardSocket(io) {
         if (typeof ack === 'function') ack({ delivered: false, reason: 'corporate', code: r.code, error: r.error });
         return;
       }
+      if (r.status === 'rejected') {
+        if (typeof ack === 'function') ack({ delivered: false, reason: 'rejected', code: r.code, error: r.error });
+        return;
+      }
       if (r.status === 'unsupported') {
         console.warn(`Command ${type} refused for device ${device_id}: needs ${r.capability}`);
         if (typeof ack === 'function') ack({ delivered: false, reason: 'unsupported', capability: r.capability });
@@ -425,7 +497,7 @@ module.exports = function setupDashboardSocket(io) {
       }
       console.log(`Command for offline device ${device_id}: ${type} (queued=${r.status === 'queued'})`);
       if (typeof ack === 'function') {
-        ack({ delivered: false, queued: r.status === 'queued', reason: 'offline' });
+        ack({ delivered: false, queued: r.status === 'queued', reason: 'offline', ...(r.firmware ? { firmware: r.firmware } : {}) });
       }
     });
 
@@ -456,3 +528,31 @@ module.exports = function setupDashboardSocket(io) {
   return dashboardNs;
 };
 
+/*
+ * ⚠️ Close every open dashboard socket of a user whose access just shrank (deleted, removed from a
+ * workspace, demoted, support grant revoked). The write-tier re-check above already refuses their
+ * next action, but the socket also holds workspace ROOMS joined at connect, and would keep
+ * receiving that workspace's live device events. A dashboard reconnects on its own; the new
+ * handshake resolves the user and rooms afresh (or fails, for a deleted user / revoked grant).
+ * Best-effort: never throws, and a no-op before the namespace exists.
+ */
+module.exports.disconnectUserSockets = function disconnectUserSockets(userId) {
+  if (!_dashboardNs || !userId) return;
+  try { _dashboardNs.in(userRoom(userId)).disconnectSockets(true); } catch (_) { /* best-effort */ }
+};
+
+/*
+ * A user REMOVED from one workspace keeps their other memberships, so closing their dashboard
+ * would be heavier than needed (the client does not auto-reconnect after a server-side close).
+ * Instead take their open sockets out of that workspace's room — unless they still reach it some
+ * other way (org admin, platform staff). Writes there are already refused live by canActOnDevice.
+ */
+module.exports.dropUserFromWorkspace = function dropUserFromWorkspace(userId, workspaceId) {
+  if (!_dashboardNs || !userId || !workspaceId) return;
+  try {
+    const u = db.prepare('SELECT role FROM users WHERE id = ?').get(userId);
+    if (u && accessibleWorkspaceIds(userId, u.role).includes(workspaceId)) return;
+    _dashboardNs.in(userRoom(userId)).socketsLeave(require('../lib/socket-rooms').workspaceRoom(workspaceId));
+  } catch (_) { /* best-effort */ }
+};
+module.exports.revalidateSocket = revalidateSocket;

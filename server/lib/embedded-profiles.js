@@ -24,11 +24,47 @@
  */
 
 const PRESETS = {
-  // ── E-Paper B/W ──────────────────────────────────────────────────────────────
+  // ── Seeed Studio reTerminal Series ──────────────────────────────────────────
   'seeed-reterminal-sticky': {
     width: 800, height: 480, rotation: 0,
     colorDepth: '1bit', dither: 'floyd-steinberg', outputFormat: 'x-epd-packed',
+    supportsPartialRefresh: true, minRefreshInterval: 5,
+    fullRefreshDurationMs: 1800, partialRefreshDurationMs: 350,
+    touchSupported: true, touchController: 'FT6336U',
   },
+  'seeed-reterminal-e1001': {
+    width: 800, height: 480, rotation: 0,
+    colorDepth: '1bit', dither: 'floyd-steinberg', outputFormat: 'x-epd-packed',
+    supportsPartialRefresh: true, minRefreshInterval: 5,
+    fullRefreshDurationMs: 3000, partialRefreshDurationMs: 350,
+    mcuTranspose: true,
+    touchSupported: false,
+  },
+  'seeed-reterminal-e1002': {
+    width: 800, height: 480, rotation: 0,
+    colorDepth: 'spectra6', dither: 'floyd-steinberg', outputFormat: 'x-epd-spectra6',
+    supportsPartialRefresh: false, minRefreshInterval: 30,
+    fullRefreshDurationMs: 14000, partialRefreshDurationMs: 0,
+    mcuTranspose: true,
+    touchSupported: false,
+  },
+  'seeed-reterminal-e1003': {
+    width: 1872, height: 1404, rotation: 0,
+    colorDepth: 'gray16', dither: 'floyd-steinberg', outputFormat: 'x-epd-gray16',
+    supportsPartialRefresh: true, minRefreshInterval: 2,
+    fullRefreshDurationMs: 1200, partialRefreshDurationMs: 180,
+    mcuTranspose: true,
+    touchSupported: true, touchController: 'GT911',
+  },
+  'seeed-reterminal-e1004': {
+    width: 1200, height: 1600, rotation: 0,
+    colorDepth: 'spectra6', dither: 'floyd-steinberg', outputFormat: 'x-epd-spectra6',
+    supportsPartialRefresh: false, minRefreshInterval: 60,
+    fullRefreshDurationMs: 22000, partialRefreshDurationMs: 0,
+    mcuTranspose: true,
+    touchSupported: false,
+  },
+  // ── Waveshare E-Paper B/W ────────────────────────────────────────────────────
   'waveshare-7.5in-v2': {
     width: 800, height: 480, rotation: 0,
     colorDepth: '1bit', dither: 'floyd-steinberg', outputFormat: 'x-epd-packed',
@@ -72,9 +108,9 @@ const PRESETS = {
   },
 };
 
-const VALID_COLOR_DEPTHS   = new Set(['1bit', '4bit-gray', '16bit-rgb565', '24bit-rgb888']);
+const VALID_COLOR_DEPTHS   = new Set(['1bit', '4bit-gray', 'gray16', 'spectra6', '16bit-rgb565', '24bit-rgb888']);
 const VALID_DITHERS        = new Set(['none', 'floyd-steinberg', 'atkinson']);
-const VALID_OUTPUT_FORMATS = new Set(['png', 'bmp', 'raw', 'x-epd-packed', 'jpeg', 'jpg']);
+const VALID_OUTPUT_FORMATS = new Set(['png', 'bmp', 'raw', 'x-epd-packed', 'x-epd-spectra6', 'x-epd-gray16', 'jpeg', 'jpg']);
 const VALID_ROTATIONS      = new Set([0, 90, 180, 270]);
 
 const DEFAULTS = {
@@ -84,45 +120,167 @@ const DEFAULTS = {
   outputFormat: 'x-epd-packed',
 };
 
+const { ROTATION_DEG } = require('./orientation-style');
+const VALID_ORIENTATIONS = new Set(['landscape', 'portrait', 'landscape-flipped', 'portrait-flipped']);
+
+/*
+ * ⚠️ WHO TRANSPOSES A PORTRAIT FRAME — THE SERVER OR THE PANEL.
+ *
+ * Every profile that existed before the reTerminal E-Series gets main's server-side rotation: the
+ * frame is composed at width x height, then img.rotate(rotation) turns it into the panel's native
+ * order, and the panel writes the bytes straight out. Hundreds of fielded panels depend on exactly
+ * those bytes.
+ *
+ * The reTerminal firmware (screentinker_mcu >= 1.3.0) instead receives the frame UNROTATED in the
+ * composed orientation and transposes it itself whenever X-ST-Screen-Width/Height differ from its
+ * native panel; the server only applies the 180-degree part of a flipped mount. That is
+ * `mcuTranspose`, and it applies only to:
+ *   - the E1001-E1004 presets, which never shipped any other way;
+ *   - a stored profile that says `"mcuTranspose": true` itself;
+ *   - the Sticky preset, but only when the panel (or a preview of it) states an orientation or
+ *     rotation in the request: only that firmware does, and an existing Sticky that states none
+ *     keeps main's bytes, including one stored with its own `rotation`.
+ */
+const MCU_TRANSPOSE_STATED = new Set(['seeed-reterminal-sticky']);
+const NIBBLE_DEPTHS = new Set(['spectra6', 'gray16']);
+
 /**
  * Return a validated, fully-populated profile object.
  * Unknown/invalid fields fall back to DEFAULTS rather than throwing — a corrupt stored
  * profile should produce a degraded image, not a 500.
  *
+ * ⚠️ `overrides` must only ever carry an orientation/rotation someone STATED: the request
+ * (?orientation= / ?rotation= / X-ST-Device-Orientation / X-ST-Device-Rotation) or one the device
+ * itself reported earlier. Never devices.orientation: every row has 'landscape' there by schema
+ * default, so it is not a choice, and feeding it in turned a portrait custom profile landscape and
+ * wiped a profile's own rotation.
+ *
  * @param {string|object|null} raw  JSON string from devices.screen_profile, or plain object.
+ * @param {object|string} [overrides] Optional stated { orientation, rotation }.
  * @returns {object|null}  Validated profile, or null if raw is empty/unparseable/missing dims.
  */
-function parseProfile(raw) {
+function parseProfile(raw, overrides = {}) {
   if (!raw) return null;
-  if (typeof raw === 'string' && PRESETS[raw]) {
-    return { ...PRESETS[raw] };
-  }
+  const opts = typeof overrides === 'string' ? { orientation: overrides } : (overrides || {});
+  const statedOrientation = VALID_ORIENTATIONS.has(opts.orientation) ? opts.orientation : null;
+  const statedRotation = VALID_ROTATIONS.has(opts.rotation) ? opts.rotation : undefined;
+  const stated = Boolean(statedOrientation) || statedRotation !== undefined;
+
   let obj;
-  try {
-    obj = typeof raw === 'string' ? JSON.parse(raw) : raw;
-  } catch {
-    if (typeof raw === 'string' && PRESETS[raw]) return { ...PRESETS[raw] };
-    return null;
+  let presetName = null;
+  if (typeof raw === 'string') {
+    if (PRESETS[raw] && !stated) return { ...PRESETS[raw] };
+    if (PRESETS[raw]) {
+      presetName = raw;
+      obj = { ...PRESETS[raw] };
+    } else {
+      try {
+        obj = JSON.parse(raw);
+      } catch {
+        return null;
+      }
+    }
+  } else {
+    obj = raw;
   }
-  if (typeof obj === 'string' && PRESETS[obj]) return { ...PRESETS[obj] };
+  if (typeof obj === 'string' && PRESETS[obj]) {
+    if (!stated) return { ...PRESETS[obj] };
+    presetName = obj;
+    obj = { ...PRESETS[obj] };
+  }
   if (typeof obj !== 'object' || obj === null) return null;
 
   if (obj.preset && PRESETS[obj.preset]) {
+    presetName = obj.preset;
     obj = { ...PRESETS[obj.preset], ...obj };
   }
 
-  const width  = Number.isInteger(obj.width)  && obj.width  > 0 && obj.width  <= 10000 ? obj.width  : null;
-  const height = Number.isInteger(obj.height) && obj.height > 0 && obj.height <= 10000 ? obj.height : null;
+  let width  = Number.isInteger(obj.width)  && obj.width  > 0 && obj.width  <= 10000 ? obj.width  : null;
+  let height = Number.isInteger(obj.height) && obj.height > 0 && obj.height <= 10000 ? obj.height : null;
   if (!width || !height) return null;
 
-  return {
+  // A stated orientation wins; otherwise the profile's own `orientation` field, if it has one.
+  const profileOrientation = VALID_ORIENTATIONS.has(obj.orientation) ? obj.orientation : null;
+  const orientation = statedOrientation || profileOrientation;
+
+  // Portrait on a landscape box (or vice versa): swap width and height.
+  if (orientation) {
+    const isPortrait = orientation === 'portrait' || orientation === 'portrait-flipped';
+    if (isPortrait && width > height) {
+      const tmp = width; width = height; height = tmp;
+    } else if (!isPortrait && width < height) {
+      const tmp = width; width = height; height = tmp;
+    }
+  }
+
+  // Rotation: stated rotation, else the stated orientation's, else the profile's OWN rotation
+  // (which a profile orientation field does not override), else the profile orientation's.
+  let rotation = DEFAULTS.rotation;
+  if (statedRotation !== undefined) rotation = statedRotation;
+  else if (statedOrientation) rotation = ROTATION_DEG[statedOrientation];
+  else if (VALID_ROTATIONS.has(obj.rotation)) rotation = obj.rotation;
+  else if (profileOrientation) rotation = ROTATION_DEG[profileOrientation];
+
+  const mcuTranspose = obj.mcuTranspose === true || (stated && MCU_TRANSPOSE_STATED.has(presetName));
+
+  const result = {
     width,
     height,
-    rotation:     VALID_ROTATIONS.has(obj.rotation)           ? obj.rotation     : DEFAULTS.rotation,
+    rotation,
     colorDepth:   VALID_COLOR_DEPTHS.has(obj.colorDepth)      ? obj.colorDepth   : DEFAULTS.colorDepth,
     dither:       VALID_DITHERS.has(obj.dither)               ? obj.dither       : DEFAULTS.dither,
     outputFormat: VALID_OUTPUT_FORMATS.has(obj.outputFormat)  ? obj.outputFormat : DEFAULTS.outputFormat,
   };
+
+  if (orientation) {
+    result.orientation = orientation;
+  }
+  if (mcuTranspose) {
+    result.mcuTranspose = true;
+  }
+  // S6: the nibble packers write two pixels per byte as one flat stream, so an odd FRAME width
+  // makes every row boundary straddle a byte. Refuse the profile rather than emit a skewed picture.
+  // Only the nibble formats: 1-bit always accepted odd widths and fielded panels use them.
+  if (NIBBLE_DEPTHS.has(result.colorDepth) && frameDimensions(result).width % 2 !== 0) return null;
+
+  if (typeof obj.supportsPartialRefresh === 'boolean') {
+    result.supportsPartialRefresh = obj.supportsPartialRefresh;
+  }
+  if (typeof obj.minRefreshInterval === 'number' && obj.minRefreshInterval >= 0) {
+    result.minRefreshInterval = obj.minRefreshInterval;
+  }
+  if (typeof obj.fullRefreshDurationMs === 'number') {
+    result.fullRefreshDurationMs = obj.fullRefreshDurationMs;
+  }
+  if (typeof obj.partialRefreshDurationMs === 'number') {
+    result.partialRefreshDurationMs = obj.partialRefreshDurationMs;
+  }
+  if (typeof obj.touchSupported === 'boolean') {
+    result.touchSupported = obj.touchSupported;
+  }
+  if (obj.touchController !== undefined) {
+    result.touchController = obj.touchController;
+  }
+
+  return result;
+}
+
+/*
+ * The dimensions of the frame actually sent (X-ST-Screen-Width / -Height). Server-side rotation by
+ * 90/270 turns a width x height composition into height x width; an MCU-transposed frame goes out as
+ * composed.
+ */
+function frameDimensions(profile) {
+  const quarter = profile.rotation === 90 || profile.rotation === 270;
+  return (quarter && !profile.mcuTranspose)
+    ? { width: profile.height, height: profile.width }
+    : { width: profile.width, height: profile.height };
+}
+
+/* What X-ST-Orientation reports: the stated/profile orientation, else the composed box's shape. */
+function frameOrientation(profile) {
+  if (profile.orientation) return profile.orientation;
+  return profile.height > profile.width ? 'portrait' : 'landscape';
 }
 
 /** Return a preset by key, or null if unknown. */
@@ -135,4 +293,4 @@ function listPresets() {
   return Object.keys(PRESETS).map(key => ({ key, ...PRESETS[key] }));
 }
 
-module.exports = { PRESETS, parseProfile, getPreset, listPresets, DEFAULTS };
+module.exports = { PRESETS, parseProfile, getPreset, listPresets, DEFAULTS, frameDimensions, frameOrientation };

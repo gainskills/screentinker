@@ -48,11 +48,28 @@ function pruneDevice(deviceId) {
 // deviceNs.to(deviceId).emit('device:playlist-update', buildPlaylistPayload(deviceId));
 // directly. Now they call queueOrEmitPlaylistUpdate which checks room presence
 // first and queues only if the device is offline.
-function queueOrEmitPlaylistUpdate(deviceNs, deviceId, buildPayload) {
+function queueOrEmitPlaylistUpdate(deviceNs, deviceId, buildPayload, _mirrorHop) {
   if (!deviceNs || !deviceId || typeof buildPayload !== 'function') return { delivered: false };
+  /*
+   * 3.0 display-link mirrors (lib/mirrors.js): a mirror plays what its original plays, so every
+   * push to the original goes to each mirror as well — with the MIRROR's own payload (built per
+   * screen, which is what keeps its audience/site-cache fields its own). This is the one place all
+   * ~20 push paths meet, so no caller has to know mirrors exist. Lazy and guarded: a lookup failure
+   * costs the mirrors an update, never the original.
+   */
+  if (!_mirrorHop) {
+    try {
+      for (const m of require('./mirrors').mirrorsOf(deviceId)) queueOrEmitPlaylistUpdate(deviceNs, m.id, buildPayload, true);
+    } catch (e) { /* mirrors are best effort */ }
+  }
   const room = deviceNs.adapter.rooms.get(deviceId);
   if (room && room.size > 0) {
-    deviceNs.to(deviceId).emit('device:playlist-update', buildPayload(deviceId));
+    const payload = buildPayload(deviceId);
+    deviceNs.to(deviceId).emit('device:playlist-update', payload);
+    // 3.0.1: when what the screen was told to show CHANGED, refresh its preview once it has drawn
+    // it (lib/preview-refresh.js: same-payload re-pushes cost nothing; debounced, a floor per
+    // screen, a cap per node). Lazy, never fatal.
+    try { require('./preview-refresh').notePush(deviceId, payload); } catch (e) { /* best effort */ }
     return { delivered: true };
   }
   pendingPlaylistUpdate.set(deviceId, { expiresAt: Date.now() + config.commandQueueTtlMs });
@@ -118,7 +135,10 @@ function flushQueue(deviceNs, deviceId, buildPayload) {
   if (pu) {
     pendingPlaylistUpdate.delete(deviceId);
     if (typeof buildPayload === 'function') {
-      deviceNs.to(deviceId).emit('device:playlist-update', buildPayload(deviceId));
+      // The reconnect flush: a baseline for the preview refresh, never an ask (a mass reconnect).
+      const payload = buildPayload(deviceId);
+      try { require('./preview-refresh').seen(deviceId, payload); } catch (e) { /* best effort */ }
+      deviceNs.to(deviceId).emit('device:playlist-update', payload);
       playlistUpdate = true;
     }
   }
@@ -182,11 +202,36 @@ function popPendingCommands(deviceId) {
   return out;
 }
 
+function peekPendingCommands(deviceId) {
+  if (!deviceId) return [];
+  pruneDevice(deviceId);
+  const cmds = pendingCommands.get(deviceId);
+  if (!cmds || cmds.size === 0) return [];
+  const out = [];
+  for (const [type, entry] of cmds) {
+    out.push({ type, payload: entry.payload });
+  }
+  return out;
+}
+
+function popCommand(deviceId, type) {
+  if (!deviceId || !type) return null;
+  pruneDevice(deviceId);
+  const cmds = pendingCommands.get(deviceId);
+  if (!cmds || !cmds.has(type)) return null;
+  const entry = cmds.get(type);
+  cmds.delete(type);
+  if (cmds.size === 0) pendingCommands.delete(deviceId);
+  return { type, payload: entry.payload };
+}
+
 module.exports = {
   queueOrEmitPlaylistUpdate,
   queueCommand,
   flushQueue,
   popPendingCommands,
+  peekPendingCommands,
+  popCommand,
   ttlForDevice,
   getQueueDepth,
   startSweep,

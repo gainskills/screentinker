@@ -13,6 +13,10 @@ The whole project is MIT licensed and self-hosting is free. A paid hosted versio
 - [Open source digital signage software](https://screentinker.com/guides/open-source-digital-signage.html): the licence, the data-ownership argument, and where ScreenTinker fits.
 - [Certified Hardware](https://screentinker.com/certified-hardware): the device models ByteTinker has tested, what each one does, which are only community-reported, and which are not supported and why.
 
+## Using ScreenTinker
+
+- [Widgets, layouts and transitions](https://screentinker.com/guides/digital-signage-widgets-layouts-transitions.html): split a screen into zones, make clock, weather and news ticker widgets, place them in zones through a playlist, and put a Transition widget in the zone it should affect ("every item" in its zone, or "only the next item"). Shader transitions run inside layout zones on the Raspberry Pi/Windows/Mac native player and on Android (from 3.0.1); Roku cross-fades; the web player, Tizen, webOS, BrightSign and Vega draw them full screen only and cut inside zones.
+
 ## Solutions by use case
 
 Each page says how the feature works, how to set it up, and what it does not do.
@@ -45,7 +49,7 @@ so plainly when it has none.
 - [Digital signage on Windows](https://screentinker.com/guides/windows-digital-signage.html): kiosk-mode browser, autostart, and the settings that decide whether it survives a month.
 - [ChromeOS and Chromebox](https://screentinker.com/guides/chromeos-digital-signage.html): managed kiosk through the Google Admin console, or unmanaged on a single device.
 - [Fire TV Stick 4K Select and HD (Vega OS)](https://screentinker.com/guides/digital-signage-vega.html): these two sticks are not Android, the APK does not install, and they are **not** certified hardware.
-- [Roku](https://screentinker.com/guides/roku-digital-signage.html): a native Roku app (in Roku Channel Store review, October 2026; Roku OS 15.1+). Plays playlists, schedules and layouts, but a Roku cannot start itself after a power cut, cannot be rebooted or screenshotted remotely, shows web content as server-drawn pictures, and cannot decode H.264 taller than 1080 pixels. Not certified hardware.
+- [Roku](https://screentinker.com/guides/roku-digital-signage.html): a native Roku app, live in the Roku Channel Store (https://my.roku.com/account/add/Screentinker; Roku OS 15.1+). Plays playlists, schedules and layouts, but a Roku cannot start itself after a power cut, cannot be rebooted or screenshotted remotely, shows web content as server-drawn pictures, and cannot decode H.264 taller than 1080 pixels. Not certified hardware.
 - [Apple TV](https://screentinker.com/guides/apple-tv-digital-signage.html): ⚠️ NOT supported, and not
   planned. tvOS ships no web view, so the player cannot run there and a native port could not show
   widgets, HTML bundles, web pages or YouTube. Unattended operation also requires MDM. Use a Raspberry

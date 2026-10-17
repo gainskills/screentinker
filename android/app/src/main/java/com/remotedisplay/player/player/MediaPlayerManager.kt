@@ -46,7 +46,10 @@ class MediaPlayerManager(
     // #624 play to end: the YouTube wrapper reported the video's length (seconds) / that it ended.
     // Only for the page currently mounted (see YoutubeBridge); always on the main thread.
     private val onYoutubeLength: (Double) -> Unit = {},
-    private val onYoutubeEnded: () -> Unit = {}
+    private val onYoutubeEnded: () -> Unit = {},
+    // #649: the bundle on screen asked to be skipped (BundleSkip); the raw reason, unsanitised.
+    // Always on the main thread, and only for the bundle mounted now.
+    private val onBundleSkip: (String?) -> Unit = {}
 ) {
     private val mainHandler = Handler(Looper.getMainLooper())
 
@@ -68,6 +71,27 @@ class MediaPlayerManager(
         }
     }
     private var youtubeBridgeInstalled = false
+
+    /*
+     * #649: the bundle document's way to say "skip me" (BundleSkip.inject). The interface is visible to
+     * every page and frame this WebView loads, so a call counts only with the random token of the
+     * bundle mounted NOW, under the mount it was loaded in: a replaced bundle, a widget, or a frame the
+     * bundle embeds cannot know it.
+     */
+    private inner class BundleSkipBridge {
+        @android.webkit.JavascriptInterface
+        fun skip(token: String?, reason: String?) {
+            mainHandler.post {
+                if (bundleMount.accepts(token, mountGeneration) && currentType == MediaType.WIDGET) onBundleSkip(reason)
+            }
+        }
+    }
+    private var bundleBridgeInstalled = false
+    private val tokenRandom = java.security.SecureRandom()
+    private val bundleMount = BundleSkip.MountToken {
+        val b = ByteArray(16); tokenRandom.nextBytes(b)
+        b.joinToString("") { "%02x".format(it) }
+    }
     private var exoPlayer: ExoPlayer? = null
     private var currentType: MediaType = MediaType.NONE
     // The URL the widget WebView currently has loaded, so re-showing the same widget can be a
@@ -386,9 +410,7 @@ class MediaPlayerManager(
     // Pick one effect at random (variety) and resolve its wrapped fragment source + params. Null if the
     // shader isn't in assets -> hard cut.
     private fun pickEffect(spec: TransitionSpec): Pair<String, Map<String, Float>>? {
-        if (spec.effects.isEmpty()) return null
-        val idx = (Math.random() * spec.effects.size).toInt().coerceIn(0, spec.effects.size - 1)
-        val e = spec.effects[idx]
+        val e = Transitions.pick(spec) ?: return null
         val src = TransitionGlsl.loadSource(context.assets, e.shader) ?: return null
         return TransitionGlsl.fragmentFor(src) to e.params
     }
@@ -652,9 +674,12 @@ class MediaPlayerManager(
 
         exoPlayer?.stop()
 
+        // #649: this mount's token; the bridge is installed once and applies from this load on.
+        val token = bundleMount.mount(mountGeneration)
         youtubeWebView?.apply {
             com.remotedisplay.player.util.WebViewSupport.configure(this, "Bundle", webLoadState)
-            loadDataWithBaseURL(null, html, "text/html", "UTF-8", null)
+            if (!bundleBridgeInstalled) { addJavascriptInterface(BundleSkipBridge(), BundleSkip.BRIDGE); bundleBridgeInstalled = true }
+            loadDataWithBaseURL(null, BundleSkip.inject(html, token), "text/html", "UTF-8", null)
         }
     }
 
@@ -982,6 +1007,33 @@ class MediaPlayerManager(
         videoLooping = loop
         exoPlayer?.repeatMode = if (loop) Player.REPEAT_MODE_ONE else Player.REPEAT_MODE_OFF
         preloadPlayer?.repeatMode = if (loop) Player.REPEAT_MODE_ONE else Player.REPEAT_MODE_OFF
+    }
+
+    /**
+     * 3.0 TV-safe video: turn the video view back by [deg] (90 / 270) inside the rotated stage, so a
+     * file the operator already turned for portrait screens fills the physical [screenW]x[screenH]
+     * panel upright instead of being turned a second time. 0 restores the normal full-stage view.
+     * The view is sized to the SCREEN and centred on the stage (which is [screenH]x[screenW] when
+     * swapped); rotating about its own centre then cancels the stage's turn exactly.
+     */
+    fun setVideoCounterTurn(deg: Float, screenW: Int, screenH: Int) {
+        val lp = playerView.layoutParams ?: return
+        if (deg == 0f) {
+            if (playerView.rotation == 0f && lp.width == android.view.ViewGroup.LayoutParams.MATCH_PARENT) return
+            lp.width = android.view.ViewGroup.LayoutParams.MATCH_PARENT
+            lp.height = android.view.ViewGroup.LayoutParams.MATCH_PARENT
+            playerView.layoutParams = lp
+            playerView.rotation = 0f
+            playerView.translationX = 0f
+            playerView.translationY = 0f
+            return
+        }
+        lp.width = screenW
+        lp.height = screenH
+        playerView.layoutParams = lp
+        playerView.translationX = (screenH - screenW) / 2f
+        playerView.translationY = (screenW - screenH) / 2f
+        playerView.rotation = -deg
     }
 
     /**
