@@ -4,6 +4,12 @@
 
 ### Added
 
+- **Status screen on the Raspberry Pi player**: a small SPI panel (ILI9341 2.4", 240x320, e.g. the
+  HiLetgo module) next to the main display shows online, offline or pairing (with the pairing code),
+  what's playing, the server, IP and Wi-Fi signal, temperature, disk, RAM and the last warning or
+  error. Likely causes turn amber or red. `sudo screentinker-pi status-display enable` prints the
+  wiring and sets up the kernel's fbtft driver; `test` draws colour bands to check it. Any fbtft panel
+  works. Suggested by ScallionShot3689 on r/digitalsignage.
 - **A background colour for a playlist** (#660). Set it next to the playback order. It's painted
   behind everything the playlist shows and replaces each screen's own background colour while that
   playlist plays. Leave **Screen's colour** ticked to keep each screen's own. Like the playback
