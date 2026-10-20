@@ -3,6 +3,7 @@ const crypto = require('crypto');
 const path = require('path');
 const fs = require('fs');
 const { resolveWithin } = require('../lib/safe-path');
+const { isRtspsUrl } = require('../lib/remote-url');
 const { db, pruneTelemetry, pruneScreenshots } = require('../db/database');
 const { effectiveDeviceTz } = require('../lib/device-timezone');
 const config = require('../config');
@@ -598,7 +599,7 @@ function refreshWidgetRevs(assignments, deviceId = null) {
  */
 const contentFactsOf = db.prepare(`
   SELECT COALESCE(NULLIF(updated_at, 0), created_at) AS rev, filepath, mime_type, file_size, bundle_entry,
-         width, height, video_prerotated
+         width, height, video_prerotated, fisheye
     FROM content WHERE id = ?
 `);
 function refreshContentRevs(assignments) {
@@ -628,6 +629,12 @@ function refreshContentRevs(assignments) {
        * at send time, so neither needs a republish. */
       if (row.width > 0 && row.height > 0) { a.width = row.width; a.height = row.height; }
       if (Number(row.video_prerotated) === 1) a.video_prerotated = 1; else delete a.video_prerotated;
+      /* A fisheye camera's view settings (lib/fisheye.js), read at send time like the flag above, so
+       * "Save" in the camera's Edit dialog moves every screen showing it without a republish. The row
+       * is the approved state: an approval workspace keeps the edit as a draft until it is released. */
+      const fisheye = row.fisheye && require('../lib/remote-url').LIVE_MIMES.includes(a.mime_type)
+        ? require('../lib/fisheye').normalize(row.fisheye) : null;
+      if (fisheye) a.fisheye = fisheye; else delete a.fisheye;
     } catch (_) { /* keep published */ }
   }
 }
@@ -758,6 +765,9 @@ function buildPlaylistPayloadUnchecked(deviceId, opts = {}) {
    */
   const deviceSupportsHls = capsLib.supports(device, 'playback.hls');
   const deviceSupportsRtsp = capsLib.supports(device, 'playback.rtsp');
+  // rtsps:// (RTSP over TLS) is still video/rtsp, but a player that only declares playback.rtsp
+  // (3.0.1 and earlier) would open it as plain RTSP and fail, so it needs playback.rtsps too.
+  const deviceSupportsRtsps = deviceSupportsRtsp && capsLib.supports(device, 'playback.rtsps');
   // HDMI IN (video/hdmi-in): only a player that found an input on THIS device declares it.
   const deviceSupportsHdmiIn = capsLib.supports(device, 'playback.hdmi_in');
   // A hold (lib/hold-item.js) is not live, but it rides the same strip for the same reason: a player
@@ -765,12 +775,12 @@ function buildPlaylistPayloadUnchecked(deviceId, opts = {}) {
   const deviceSupportsHold = capsLib.supports(device, 'playback.hold');
   // `sink` (preview trace only) collects what was left out; the base playlist passes it, triggers don't.
   const dropLiveIfUnsupported = (items, sink = null) => {
-    if (!Array.isArray(items) || (deviceSupportsHls && deviceSupportsRtsp && deviceSupportsHdmiIn && deviceSupportsHold)) return items;
+    if (!Array.isArray(items) || (deviceSupportsHls && deviceSupportsRtsps && deviceSupportsHdmiIn && deviceSupportsHold)) return items;
     return items.filter((a) => {
       if (!a) return true;
       let keep = true;
       if (a.mime_type === 'video/hls') keep = deviceSupportsHls;
-      else if (a.mime_type === 'video/rtsp') keep = deviceSupportsRtsp;
+      else if (a.mime_type === 'video/rtsp') keep = isRtspsUrl(a.remote_url) ? deviceSupportsRtsps : deviceSupportsRtsp;
       else if (a.mime_type === 'video/hdmi-in') keep = deviceSupportsHdmiIn;
       else if (a.mime_type === 'application/x-st-hold') keep = deviceSupportsHold;
       if (!keep && sink) sink.push(a);
@@ -781,6 +791,8 @@ function buildPlaylistPayloadUnchecked(deviceId, opts = {}) {
 
   let assignments = [];
   let playback_order = 'sequential';
+  // #660: the playlist whose own background colour (if any) this screen paints, in place of its own.
+  let bgPlaylistId = null;
   let campaignRaw = null;
   /*
    * ⚠️ CORPORATE: a head office mandate drives this screen (source 'corporate', with or without a
@@ -849,6 +861,7 @@ function buildPlaylistPayloadUnchecked(deviceId, opts = {}) {
     refreshContentRevs(assignments);
     assignments = dropLiveIfUnsupported(assignments);
     playback_order = (pl && pl.published_playback_order) || 'sequential';
+    bgPlaylistId = t.target_ref;
   } else if (capNow) {
     const feed = capNow.feed;
     const pl = feed.playlist_id
@@ -863,6 +876,7 @@ function buildPlaylistPayloadUnchecked(deviceId, opts = {}) {
       playback_order = 'sequential';
     } else {
       playback_order = (pl && pl.published_playback_order) || 'sequential';
+      bgPlaylistId = feed.playlist_id;
     }
     for (const a of items) if (a && typeof a === 'object') a.__origin_ws = feed.workspace_id;
     assignments = items;
@@ -873,10 +887,12 @@ function buildPlaylistPayloadUnchecked(deviceId, opts = {}) {
     assignments = hookNow.items;
     for (const a of assignments) if (a && typeof a === 'object') a.__origin_ws = hookNow.override.workspace_id;
     playback_order = hookNow.playback_order;
+    bgPlaylistId = hookNow.override.playlist_id;
     refreshWidgetRevs(assignments, deviceId);
     refreshContentRevs(assignments);
     assignments = dropLiveIfUnsupported(assignments);
   } else if (corporateSource && device?.playlist_id) {
+    bgPlaylistId = device.playlist_id;
     try {
       const c = require('../lib/corporate/composition').compositionFor(db, deviceId, device.playlist_id);
       assignments = c.items;
@@ -894,6 +910,7 @@ function buildPlaylistPayloadUnchecked(deviceId, opts = {}) {
     refreshContentRevs(assignments);   // re-stamps a.mime_type, so strip live AFTER it
     assignments = dropLiveIfUnsupported(assignments, baseSink);
   } else if (device?.playlist_id) {
+    bgPlaylistId = device.playlist_id;
     const playlist = db.prepare('SELECT published_snapshot, published_playback_order, workspace_id FROM playlists WHERE id = ?').get(device.playlist_id);
     // 3.0 campaigns (lib/campaign.js): the stored structure, read only for a player that can use it.
     if (playlist && capsLib.supports(device, 'layout.campaign')) {
@@ -1184,7 +1201,12 @@ function buildPlaylistPayloadUnchecked(deviceId, opts = {}) {
   // Weather and area conditions are decided here, for this screen (lib/local-conditions.js).
   if (trace) trace.before_local = assignments;
   assignments = require('../lib/local-conditions').filterItems(assignments, device, opts.weather || undefined);
-  const assembled = assemblePayload({ assignments, layout, orientation: device?.orientation || 'landscape', background_color: device?.background_color || null, workspace_id: device?.workspace_id || null, wall_config, group_sync, timezone, triggers, trigger_config, local_api, playback_order, default_content, power_schedule, endpoints: deviceEndpoints });
+  // #660: a playlist's published colour wins over the device's while that playlist plays.
+  let playlistBg = null;
+  if (bgPlaylistId && require('../lib/corporate/schema-probe').hasColumn(db, 'playlists', 'published_background_color')) {
+    playlistBg = (db.prepare('SELECT published_background_color FROM playlists WHERE id = ?').get(bgPlaylistId) || {}).published_background_color || null;
+  }
+  const assembled = assemblePayload({ assignments, layout, orientation: device?.orientation || 'landscape', background_color: playlistBg || device?.background_color || null, workspace_id: device?.workspace_id || null, wall_config, group_sync, timezone, triggers, trigger_config, local_api, playback_order, default_content, power_schedule, endpoints: deviceEndpoints });
   /*
    * Audience counting (lib/audience.js). Top-level and outside the item list, so switching it on or
    * off never restarts playback (#234). Rides EVERY payload, and null means OFF — so a screen that
@@ -3492,6 +3514,16 @@ module.exports = function setupDeviceSocket(io) {
     socket.on('device:screenshot', (data) => dispatch('screenshot', data));
 
     socket.on('device:http-result', (data) => dispatch('http-result', data));
+
+    /*
+     * The answer to an ONVIF relay request (lib/onvif/relay.js). Not through dispatch(): nothing is
+     * applied or forwarded, it resolves the request THIS process is waiting on, and handleResult
+     * ignores it unless it answers a request made to this very screen.
+     */
+    socket.on('device:onvif-result', (data) => {
+      if (!requireDeviceAuth()) return;
+      require('../lib/onvif/relay').handleResult(currentDeviceId, data);
+    });
 
     socket.on('device:shell-result', (data) => dispatch('shell-result', data));
 

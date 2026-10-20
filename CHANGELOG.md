@@ -1,5 +1,155 @@
 # Changelog
 
+## 3.0.2
+
+### Added
+
+- **ONVIF cameras** (docs/onvif-cameras.md). **Add content → ONVIF camera**:
+  - Find cameras on the network, or type an address. Sign in, pick a stream, and add it as a live
+    stream every RTSP-capable screen already plays.
+  - The camera's snapshot becomes the thumbnail.
+  - The item's Edit dialog can ask for a new snapshot or a new stream address, change the stored
+    password and, on a PTZ camera, pan, tilt, zoom, go home and go to presets. A held arrow
+    moves; the camera stops by itself if a stop is lost.
+  - A hosted server reaches the cameras through a **screen on their network**: Android and the
+    Raspberry Pi / Windows player relay three narrow operations (discovery, a SOAP request, a
+    snapshot), private addresses only, size-capped. A self-hosted server can talk to them itself
+    when `OUTBOUND_ALLOW_PRIVATE` / `OUTBOUND_ALLOW_HOSTS` opens the LAN.
+  - The camera password is stored encrypted and never sent back to a browser.
+  - Works with WS-Security and HTTP Digest, Media and Media2, and cameras with the wrong clock.
+  - Additive columns `content.onvif` and `content.onvif_secret`. New player capability
+    `onvif.bridge`.
+- **Weather in your language** (#667, requested by @djalfe). A Weather data source's language now
+  translates the weather conditions ("Mainly clear") and the template's words ("Feels like",
+  "Humidity", "Today", "Updated", the chance of precipitation), not only the day names. Language
+  files on the server cover Danish, Dutch, English, French, German, Hindi, Italian, Japanese,
+  Portuguese, Simplified Chinese and Spanish. Any other language falls back to English, and a data
+  source with no language set looks exactly as before. The data source gains `label_*` fields and
+  `day0_precip_text`. The **Weather forecast** template 1.1.0 (needs server 3.0.2) and **Weather —
+  animated** 1.1.0 use them; the animated one falls back to English on an older server.
+
+- **A default zone for a playlist.** Under the playlist's **Layout**, pick the zone that **new** items
+  go to when they're added without one (from the Manager app, the API, Make a sign, content requests,
+  agency uploads, cloud folders...). It replaces the layout's main zone for that playlist's new items
+  only, so playlists sharing a layout can each send new items to a different zone. **Existing items
+  never move**: the zone is saved on each item as it's added, so items already in the playlist, and
+  ones added before a later change, stay where they are. Additive column `playlists.default_zone_id`.
+- **Status screen on the Raspberry Pi player**: a small SPI panel (ILI9341 2.4", 240x320, e.g. the
+  HiLetgo module) next to the main display shows online, offline or pairing (with the pairing code),
+  what's playing, the server, IP and Wi-Fi signal, temperature, disk, RAM and the last warning or
+  error. Likely causes turn amber or red. `sudo screentinker-pi status-display enable` prints the
+  wiring and sets up the kernel's fbtft driver; `test` draws colour bands to check it. Any fbtft panel
+  works. Suggested by ScallionShot3689 on r/digitalsignage.
+- **A background colour for a playlist** (#660). Set it next to the playback order. It's painted
+  behind everything the playlist shows and replaces each screen's own background colour while that
+  playlist plays. Leave **Screen's colour** ticked to keep each screen's own. Like the playback
+  order, it reaches screens when you publish. Additive columns `playlists.background_color` and
+  `published_background_color`.
+- **Transparent background on a playlist item** (#660): a tick on a widget or HTML bundle row draws
+  that item see-through, whatever colour the widget itself sets, so the playlist, screen or zone
+  colour shows behind it. Players ask for it with `transparent=1` on the render URL; a player too
+  old to send it shows the item as before. A web page inside a URL widget, YouTube, images and
+  videos draw their own background, so the tick isn't offered on them. Additive column
+  `playlist_items.transparent_bg`.
+- **RTSPS camera streams** (`rtsps://`, RTSP over TLS, e.g. UniFi Protect's default share link) on the
+  Android and native Raspberry Pi / Windows / Mac players. The camera's certificate is checked (trusted
+  authorities plus the host name) before the player sends it the login. A camera with a self-signed
+  certificate can be marked **Camera uses a self-signed certificate**: still encrypted, but not
+  verified, for that camera only. The native player makes the TLS connection itself, checks the
+  certificate on it and relays that connection to Qt on loopback, because FFmpeg doesn't check
+  certificates and can't be told to. New capability `playback.rtsps`, so a 3.0.1 player, which would open an rtsps URL as plain
+  RTSP, is never sent one. Additive column `content.tls_self_signed`.
+
+- **Fisheye (360°) cameras shown as a normal view, steered live ("digital PTZ").** A camera item can
+  be marked as a fisheye: the screen cuts a flat, always-upright view out of the round picture and
+  re-projects it on the GPU every frame, full screen or in a layout zone, on the Android and native
+  players (`playback.fisheye`). Pan, tilt and zoom are set in the camera's Edit dialog, which can
+  steer a chosen screen live while the sliders move; Save stores the view and moves every screen to
+  it without a republish (read at send time, like `video_prerotated`). Optional touch steering on the
+  screen (drag, pinch, double-tap to reset), off by default. New `camera_view` command (live only,
+  never queued) and additive column `content.fisheye`. One shared definition (server/lib/fisheye.js)
+  held to the Android and native maths by `shared/fisheye-vectors.json`.
+
+### Fixed
+
+- **A camera in a layout zone reconnects by itself (Android).** A zone with one item had no error
+  handling at all, and no zone had a stall watchdog. A camera whose connection dropped (the NVR
+  restarted, the Wi-Fi roamed, the camera rebooted) froze on its last frame until the app was
+  restarted. Zone and video-wall videos are now watched like full-screen video:
+  - Watched: the frames actually drawn, so a picture that stops changing counts as a fault.
+  - An error, or 10 s with no new frame (30 s buffering), is a fault.
+  - On a fault, a zone of one item reconnects in place after 2, 4, 8, 15, then every 30 s. A
+    rotating zone moves on as before.
+  - A live stream in a wall zone reconnects instead of showing the zone background until a
+    boundary it never reaches.
+
+- **Empty zones stay empty on the web player** (#666, reported by @djalfe). In a multi-zone layout, a
+  zone with nothing assigned to it showed a copy of whatever was playing, so the same content
+  appeared in zones it was never put in. This affected browsers, BrightSign and webOS, which use
+  the web player. Those zones now stay blank, as they already did on Android, Tizen, the native player and Roku. Items
+  without a zone still go to the first zone that has nothing of its own, so no existing screen moves
+  its content. If no zone has anything at all, the current item is still shown, so a layout never
+  blanks the whole screen.
+
+- **Android and Samsung Tizen now paint the device's background colour** (#325 parity). Only the web,
+  native and Roku players did; on these two it was saved and never shown.
+- **Web content is see-through unless you choose a background colour** (#660, reported by @djalfe).
+  The web player gave full-screen widgets and HTML bundles a black frame that it never removed, so a
+  transparent widget hid the screen's background colour behind black when it filled the screen (in a
+  zone it didn't). The YouTube
+  letterbox on the web, Android and native players was black too. A widget with no colour now shows
+  the zone, layer or screen background behind it.
+- **Widget backgrounds can be Transparent.** The colour pickers for the clock, RSS, text, cloud document
+  and BI dashboard widgets had no way to say "no colour", so saving a clock or text widget turned its
+  transparent default into black. Each now has a **Transparent** checkbox, ticked by default.
+
+- **Applying a layout to a screen didn't reach the screen** until it next reconnected: the dashboard
+  said "Layout applied" and the old layout stayed up. The screen is now told at once.
+- **In a layout zone, an edited camera URL or certificate setting didn't reach the screen** (the zone
+  only compared content ids). It now reconnects, as full screen already did.
+
+- **UniFi Protect cameras did not play on Android.** Two media3 limits, both now handled in the
+  player's own RTSP socket: (1) UniFi's share link ends in `?enableSrtp`, which makes the camera
+  encrypt every RTP payload with SRTP, and media3 has no SRTP, so every track arrived as ciphertext
+  (on the emulator this looked like an HEVC decoder fault). Over `rtsps://` the stream already
+  rides the TLS connection, so the Android player now drops `enableSrtp` there. (2) media3's RTP Opus
+  reader expects Ogg-style OpusHead/OpusTags packets that RTP Opus never sends, and one Opus track
+  failed the whole stream; the player now puts those two headers in front of the first Opus packet,
+  so Opus audio plays. Verified on a real Allwinner tablet (hardware HEVC + Opus) against a UniFi
+  camera. The native player needed neither: FFmpeg handles SRTP and RTP Opus.
+- **A camera or HDMI-in item couldn't be set back to "stay until skipped"** (play time 0) when
+  editing it: the check only counted HLS as live. It now uses the same live types as adding.
+- **A camera that was down or refused the connection reconnected about 60 times a second** when it was
+  the only item that could play (Android and the native player). It now retries after 2, 4, 8 and
+  15 s, then every 30 s.
+- **Editing a live stream's URL didn't reach a screen that was showing it**: the stream never ends, so
+  the new URL waited for a reboot. The screen now reconnects at once (Android and the native player).
+- A stream added without a name was named from the end of its URL, which for `rtsp://user:pass@host`
+  was the user name and password. It is now named from the path or the host, and never after a share
+  token.
+
+### Security
+
+- **Camera passwords are no longer shown back.** A camera URL's password reaches only the screens that
+  play it; every other JSON response (content library, playlist editor, device pages, API tokens, MCP,
+  the Manager app, `/view` links) shows `rtsp://user:********@…`. An edit that keeps the stars keeps
+  the saved password, but only for the same scheme, host and port, so an editor can't point the stream
+  at their own host to collect it. A password is masked whole even when it holds a quote, a space or an
+  `@`. Data exports keep the full URL, as backups.
+- **Share tokens in a camera URL's path are masked too.** A UniFi Protect link
+  (`rtsps://nvr:7441/<token>`) has no password; the token alone opens the stream. A path segment that
+  looks like one (16+ letters and digits, mixed case) is shown as `********` and kept on edit, by the
+  same rules as a password.
+- The Android and native players no longer write a camera's password or share token to their logs.
+
+### Upgrade notes
+
+- **RSS, cloud document and BI dashboard widgets with no saved colour were black and are now
+  transparent.** Full screen they look the same, over the screen's background colour (black unless one
+  is set). In a layout zone over other content, that content now shows through the widget. To keep a
+  widget black, untick **Transparent** and pick black. A widget whose colour was already saved,
+  including the #000000 the old picker saved, keeps that colour.
+
 ## 3.0.1
 
 Security fixes, the fixes from the first days of 3.0 in the field, account deletion, Telegram alerts,

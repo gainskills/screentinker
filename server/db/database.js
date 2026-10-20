@@ -677,6 +677,19 @@ const migrations = [
   // embed at 720p (playerVars.vq='hd720') so weak/unstable WiFi on Android TV doesn't
   // buffer/stall on an auto-selected 1080p+ stream. DEFAULT 0 = no cap (today's behaviour).
   "ALTER TABLE content ADD COLUMN unstable_connection INTEGER NOT NULL DEFAULT 0",
+  // An rtsps:// camera with a self-signed certificate (UniFi Protect's default): the player skips
+  // the certificate check for this item only. DEFAULT 0 = verify, as every other TLS connection.
+  "ALTER TABLE content ADD COLUMN tls_self_signed INTEGER NOT NULL DEFAULT 0",
+  // A fisheye (360°) camera shown as a normal 16:9 view: JSON settings (lib/fisheye.js), NULL = show
+  // the picture as it comes.
+  "ALTER TABLE content ADD COLUMN fisheye TEXT",
+  // An ONVIF camera (lib/onvif): JSON {xaddr, username, profile_token, profile_name, ptz, via,
+  // services} so the server can refresh its stream address, fetch a snapshot and steer it. `via` is
+  // 'server' or the id of the screen that bridges the camera's network. The password is NOT in it:
+  // onvif_secret holds it encrypted (lib/secretbox.js) and it is never sent back to a browser.
+  // NULL = an ordinary stream.
+  "ALTER TABLE content ADD COLUMN onvif TEXT",
+  "ALTER TABLE content ADD COLUMN onvif_secret TEXT",
   // #216: subtitle/caption support as a content property (applied automatically by the
   // player, no in-player controls). YouTube uses captions_enabled + captions_lang (via the
   // IFrame API); uploaded videos use subtitle_url (a .vtt filename in the content dir,
@@ -4400,6 +4413,24 @@ migrationStep('smart playlists', () => {
   // #624 "Play to end" (lib/play-to-end.js): a YouTube item advances when the video ends, and its
   // duration_sec becomes the most it may run. NULL = the item's duration decides, as before.
   try { db.prepare('ALTER TABLE playlist_items ADD COLUMN play_to_end INTEGER').run(); console.log('[migrate] playlist_items.play_to_end added'); } catch (_) { /* present */ }
+});
+
+migrationStep('#660 playlist and item backgrounds', () => {
+  // A playlist's own background colour, painted behind what it shows in place of the device's
+  // background_color (lib/backgrounds.js). Hex; NULL = the screen's colour, as before. Published
+  // like playback_order: screens get published_background_color.
+  try { db.prepare('ALTER TABLE playlists ADD COLUMN background_color TEXT').run(); console.log('[migrate] playlists.background_color added'); } catch (_) { /* present */ }
+  try { db.prepare('ALTER TABLE playlists ADD COLUMN published_background_color TEXT').run(); } catch (_) { /* present */ }
+  // "Transparent background" on one item: its widget, bundle or template is drawn see-through.
+  // 1 or NULL; NULL = as the content itself sets it.
+  try { db.prepare('ALTER TABLE playlist_items ADD COLUMN transparent_bg INTEGER').run(); console.log('[migrate] playlist_items.transparent_bg added'); } catch (_) { /* present */ }
+});
+
+migrationStep('playlist default zone', () => {
+  // The zone of the playlist's layout that NEW items added without a zone are given
+  // (lib/playlist-layout.js zoneForNewItem). A setting, not published content: it is stored on each
+  // item as it is added, so existing items never move. NULL = no zone, as before.
+  try { db.prepare('ALTER TABLE playlists ADD COLUMN default_zone_id TEXT').run(); console.log('[migrate] playlists.default_zone_id added'); } catch (_) { /* present */ }
 });
 
 migrationStep('SAML', () => {

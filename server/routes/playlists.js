@@ -14,6 +14,7 @@ const { parseTags, parseMeta } = require('../lib/content-tags');
 const smartPlaylist = require('../lib/smart-playlist');
 const { applyRepeatEvery, normalizeRepeatEvery } = require('../lib/repeat-every');
 const playToEnd = require('../lib/play-to-end');
+const backgrounds = require('../lib/backgrounds');
 const playlistLayout = require('../lib/playlist-layout');
 const { emitMuteChanged } = require('../lib/mute-sync');
 const corpGuard = require('../lib/corporate/guard');
@@ -223,7 +224,7 @@ function attachSlideAudio(it) {
 // the playlist query below and snapshotItemForRef (a slot's fallback item), so a fallback is
 // denormalized exactly like any other item and the two cannot drift.
 const SNAPSHOT_MEDIA_COLS = `COALESCE(c.filename, w.name) as filename, c.mime_type, c.filepath, c.file_size,
-           c.duration_sec as content_duration, c.remote_url, c.unstable_connection,
+           c.duration_sec as content_duration, c.remote_url, c.unstable_connection, c.tls_self_signed, c.fisheye,
            c.captions_enabled, c.captions_lang, c.subtitle_url, c.subtitle_lang,
            c.tags AS content_tags, c.meta AS content_meta,
            w.name as widget_name, w.widget_type, w.config as widget_config, w.updated_at as widget_rev`;
@@ -257,6 +258,14 @@ function decorateSnapshotItem(it) {
   if (!it.repeat_every_sec) delete it.repeat_every_sec;
   // #624: sent only when set and only on YouTube, so every other snapshot stays byte-identical.
   if (it.play_to_end && playToEnd.appliesTo(it.mime_type)) it.play_to_end = 1; else delete it.play_to_end;
+  // rtsps camera with a self-signed certificate: sent only when set and only on a camera item, so
+  // every other snapshot stays byte-identical.
+  if (Number(it.tls_self_signed) === 1 && it.mime_type === 'video/rtsp') it.tls_self_signed = 1; else delete it.tls_self_signed;
+  // A fisheye camera's view settings (lib/fisheye.js): sent only when set, on a live item.
+  const fisheye = it.fisheye && require('../lib/remote-url').LIVE_MIMES.includes(it.mime_type) ? require('../lib/fisheye').normalize(it.fisheye) : null;
+  if (fisheye) it.fisheye = fisheye; else delete it.fisheye;
+  // #660: likewise only when set, and only where there is a page of ours to draw see-through.
+  if (it.transparent_bg && backgrounds.transparentApplies(it)) it.transparent_bg = 1; else delete it.transparent_bg;
   delete it._iid;
   attachSlideAudio(it);
   return it;
@@ -281,7 +290,7 @@ function snapshotItemForRef({ content_id = null, widget_id = null, duration_sec 
   const it = db.prepare(`
     SELECT NULL AS _iid, ? AS content_id, ? AS widget_id, NULL AS child_playlist_id, ? AS zone_id, 0 AS sort_order,
            ? AS duration_sec, 0 AS muted, NULL AS play_from, NULL AS play_until, 1 AS enabled, 1 AS log_play,
-           NULL AS fit_mode, NULL AS play_when, 1 AS weight, NULL AS repeat_every_sec, NULL AS play_to_end,
+           NULL AS fit_mode, NULL AS play_when, 1 AS weight, NULL AS repeat_every_sec, NULL AS play_to_end, NULL AS transparent_bg,
            ${SNAPSHOT_MEDIA_COLS}
       FROM (SELECT 1) one
       LEFT JOIN content c ON c.id = ?
@@ -374,10 +383,12 @@ function buildSnapshotItemsInner(playlistId, _depth = 0, _ancestors = null, opts
   const hasSlots = schemaProbe.hasColumn(db, 'playlist_items', 'slot_id');
   // 3.0 campaigns: layout_ref_id likewise — selected last, deleted from every ordinary row.
   const hasLayoutRef = schemaProbe.hasColumn(db, 'playlist_items', 'layout_ref_id');
+  // #660 likewise; decorateSnapshotItem deletes it unless set.
+  const hasTransparentBg = schemaProbe.hasColumn(db, 'playlist_items', 'transparent_bg');
   const items = db.prepare(`
     SELECT pi.id AS _iid, pi.content_id, pi.widget_id, pi.child_playlist_id, pi.zone_id, pi.sort_order, pi.duration_sec, pi.muted,
            pi.play_from, pi.play_until, pi.enabled, pi.log_play, pi.fit_mode, pi.play_when, pi.weight, pi.repeat_every_sec, pi.play_to_end,
-           ${SNAPSHOT_MEDIA_COLS}${hasSlots ? ', pi.slot_id' : ''}${hasLayoutRef ? ', pi.layout_ref_id' : ''}
+           ${SNAPSHOT_MEDIA_COLS}${hasSlots ? ', pi.slot_id' : ''}${hasLayoutRef ? ', pi.layout_ref_id' : ''}${hasTransparentBg ? ', pi.transparent_bg' : ''}
     FROM playlist_items pi
     LEFT JOIN content c ON pi.content_id = c.id
     LEFT JOIN widgets w ON pi.widget_id = w.id
@@ -612,6 +623,8 @@ function playlistPreviewLayout(playlist, items) {
       l.explicit = true;
       const main = playlistLayout.mainZone(l.zones);
       l.main_zone_id = main ? main.id : null;
+      // The zone new items added without one are given (zoneForNewItem), while it is in this layout.
+      l.default_zone_id = playlist.default_zone_id && l.zones.some((z) => z.id === playlist.default_zone_id) ? playlist.default_zone_id : null;
       return l;
     }
   }
@@ -775,7 +788,10 @@ function publishPlaylist(playlistId, reqOrIo, seen = new Set([playlistId])) {
    * that old loop (composition.composeInputs prefers the composable over the snapshot).
    */
   const hasComposable = isCorporate || schemaProbe.hasColumn(db, 'playlists', 'published_composable');
-  const prev = db.prepare(`SELECT status, published_snapshot, published_structure, playback_order, published_playback_order, smart_rules, published_smart_rules${hasComposable ? ', published_composable' : ''} FROM playlists WHERE id = ?`).get(playlistId);
+  // #660: the playlist's background colour goes live with the publish, like playback_order.
+  const hasBg = schemaProbe.hasColumn(db, 'playlists', 'published_background_color');
+  const prev = db.prepare(`SELECT status, published_snapshot, published_structure, playback_order, published_playback_order, smart_rules, published_smart_rules${hasComposable ? ', published_composable' : ''}${hasBg ? ', background_color, published_background_color' : ''} FROM playlists WHERE id = ?`).get(playlistId);
+  const bgSame = !hasBg || !prev || (prev.published_background_color || null) === (prev.background_color || null);
   const order = normalizePlaybackOrder(prev && prev.playback_order) || 'sequential';
 
   // ⚠️ Structure is captured PRE-expansion so "discard" can restore the nesting the flat snapshot
@@ -784,7 +800,7 @@ function publishPlaylist(playlistId, reqOrIo, seen = new Set([playlistId])) {
   // the nesting audit's exact shape. Only present when set, so every other structure is unchanged.
   const hasSlots = schemaProbe.hasColumn(db, 'playlist_items', 'slot_id');
   const structureRows = db.prepare(`
-    SELECT id, content_id, widget_id, child_playlist_id, zone_id, sort_order, duration_sec, muted, play_from, play_until, enabled, log_play, fit_mode, play_when, weight, repeat_every_sec, play_to_end${hasSlots ? ', slot_id' : ''}${schemaProbe.hasColumn(db, 'playlist_items', 'layout_ref_id') ? ', layout_ref_id' : ''}
+    SELECT id, content_id, widget_id, child_playlist_id, zone_id, sort_order, duration_sec, muted, play_from, play_until, enabled, log_play, fit_mode, play_when, weight, repeat_every_sec, play_to_end${hasSlots ? ', slot_id' : ''}${schemaProbe.hasColumn(db, 'playlist_items', 'layout_ref_id') ? ', layout_ref_id' : ''}${schemaProbe.hasColumn(db, 'playlist_items', 'transparent_bg') ? ', transparent_bg' : ''}
       FROM playlist_items WHERE playlist_id = ? ORDER BY sort_order ASC
   `).all(playlistId);
   const structSources = camp.sourcesFor(db, structureRows.filter((r) => r.layout_ref_id).map((r) => r.id));
@@ -793,10 +809,11 @@ function publishPlaylist(playlistId, reqOrIo, seen = new Set([playlistId])) {
   // fetch the blocks and is dropped from the stored structure.
   const structure = JSON.stringify(structureRows.map((row) => {
     const blocks = schedulesForItem(row.id);
-    const { id, slot_id, play_to_end, layout_ref_id, ...rest } = row;
+    const { id, slot_id, play_to_end, transparent_bg, layout_ref_id, ...rest } = row;
     const out = blocks.length ? { ...rest, schedules: blocks } : rest;
     // play_to_end (#624) only when set, like slot_id, so every existing structure stays byte-identical.
     if (play_to_end) out.play_to_end = 1;
+    if (transparent_bg) out.transparent_bg = 1;   // #660, same rule
     // 3.0 campaigns: a layout item and its zone sources, only when set (same reason).
     if (layout_ref_id) { out.layout_ref_id = layout_ref_id; const s = structSources.get(id); if (s) out.zone_sources = s; }
     return slot_id ? { ...out, slot_id } : out;
@@ -809,7 +826,7 @@ function publishPlaylist(playlistId, reqOrIo, seen = new Set([playlistId])) {
   const layoutSame = !layoutRow || (layoutRow.published_layout_id || null) === nextLayout;
   const campaignSame = !hasCampaignCol || ((db.prepare('SELECT published_campaign FROM playlists WHERE id = ?').get(playlistId) || {}).published_campaign || null) === nextCampaign;
   if (prev && prev.status === 'published' && prev.published_snapshot === next && (prev.published_playback_order || 'sequential') === order
-      && (!hasComposable || (prev.published_composable || null) === composable) && layoutSame && campaignSame) {
+      && (!hasComposable || (prev.published_composable || null) === composable) && layoutSame && campaignSame && bgSame) {
     /*
      * The resolved list is unchanged, so no device is touched and nothing restarts — that is the
      * point of this early exit. But STRUCTURE can differ while the flat output does not: replacing
@@ -837,7 +854,7 @@ function publishPlaylist(playlistId, reqOrIo, seen = new Set([playlistId])) {
   // The composable's pairing with this snapshot, so a snapshot some other version writes is noticed.
   const hasPair = hasComposable && schemaProbe.hasColumn(db, 'playlists', 'published_composable_of');
   const pair = composable ? require('../lib/corporate/digest').snapshotDigest(next) : null;
-  db.prepare(`UPDATE playlists SET status = 'published', published_snapshot = ?, published_structure = ?, published_playback_order = ?, published_smart_rules = smart_rules${hasComposable ? ', published_composable = ?' : ''}${hasPair ? ', published_composable_of = ?' : ''}${hasRev ? ', published_rev = published_rev + 1' : ''}${hasLayout ? ', published_layout_id = layout_id' : ''}${hasCampaignCol ? ', published_campaign = ?' : ''}, updated_at = strftime('%s','now') WHERE id = ?`)
+  db.prepare(`UPDATE playlists SET status = 'published', published_snapshot = ?, published_structure = ?, published_playback_order = ?, published_smart_rules = smart_rules${hasComposable ? ', published_composable = ?' : ''}${hasPair ? ', published_composable_of = ?' : ''}${hasRev ? ', published_rev = published_rev + 1' : ''}${hasLayout ? ', published_layout_id = layout_id' : ''}${hasBg ? ', published_background_color = background_color' : ''}${hasCampaignCol ? ', published_campaign = ?' : ''}, updated_at = strftime('%s','now') WHERE id = ?`)
     .run(...[next, structure, order, ...(hasComposable ? [composable] : []), ...(hasPair ? [pair] : []), ...(hasCampaignCol ? [nextCampaign] : []), playlistId]);
   pushToDevices(playlistId, reqOrIo, { skipCorporate: isCorporate });
   corpFanout.afterPublish(corpCtx, reqOrIo);
@@ -1205,6 +1222,8 @@ router.get('/:id/preview-payload', requirePlaylistRead, (req, res) => {
     // not match what a real device shows. Same omission that dropped it from the live device payload.
     workspace_id: req.playlist.workspace_id || null,
     playback_order: req.playlist.playback_order || 'sequential',
+    // #660: the draft's colour, as a screen will show it once published.
+    background_color: req.playlist.background_color || null,
   });
   if (campaignObj) {
     const c = camp.payloadCampaign(db, campaignObj, { orientation }, (l) => l);
@@ -1232,6 +1251,18 @@ router.put('/:id', requirePlaylistWrite, (req, res) => {
     if (order === false) return res.status(400).json({ error: 'playback_order must be sequential, shuffle, or weighted' });
     updates.push('playback_order = ?');
     values.push(order);
+  }
+  // #660: '' or null clears it (the screen's own colour); anything else must be a hex colour.
+  let bgChanged = false;
+  if (req.body.background_color !== undefined) {
+    const bg = backgrounds.normalizePlaylistBg(req.body.background_color);
+    const clearing = req.body.background_color === null || req.body.background_color === '';
+    if (bg === null && !clearing) return res.status(400).json({ error: 'background_color must be a hex colour like #1a2b3c, or empty for the screen\'s colour' });
+    if (bg !== (req.playlist.background_color || null)) {
+      updates.push('background_color = ?');
+      values.push(bg);
+      bgChanged = true;
+    }
   }
   let rulesChanged = false;
   if (req.body.smart_rules !== undefined) {
@@ -1311,6 +1342,39 @@ router.put('/:id', requirePlaylistWrite, (req, res) => {
     }
   }
 
+  /*
+   * The playlist's default zone: the zone NEW items added without one are given
+   * (lib/playlist-layout.js zoneForNewItem). A setting, not a draft: it changes no item already in the
+   * playlist, so there is nothing to publish. It must be a zone of the layout the playlist has AFTER
+   * this request. A layout change carries it through the confirmed zone_map and drops it when the new
+   * layout has no such zone; clearing the layout clears it.
+   */
+  let defaultZoneChanged = false;
+  if (schemaProbe.hasColumn(db, 'playlists', 'default_zone_id')) {
+    const layoutAfter = layoutChanged ? (req.body.layout_id || null) : (req.playlist.layout_id || null);
+    const current = req.playlist.default_zone_id || null;
+    const asked = req.body.default_zone_id !== undefined;
+    let wanted = current;
+    if (asked) {
+      wanted = req.body.default_zone_id || null;
+      if (wanted !== null && typeof wanted !== 'string') return res.status(400).json({ error: 'default_zone_id must be a zone id or null' });
+      if (wanted && !layoutAfter) return res.status(400).json({ error: 'Choose a layout for this playlist before choosing its default zone.', code: 'DEFAULT_ZONE_NO_LAYOUT' });
+    } else if (layoutChanged && current) {
+      const moved = (zoneMoves || []).find(([from]) => from === current);
+      if (moved) wanted = moved[1];
+    }
+    if (!layoutAfter) wanted = null;
+    if (wanted && !db.prepare('SELECT 1 FROM layout_zones WHERE id = ? AND layout_id = ?').get(wanted, layoutAfter)) {
+      if (asked) return res.status(400).json({ error: 'default_zone_id is not a zone of this playlist\'s layout' });
+      wanted = null;
+    }
+    if (wanted !== current) {
+      updates.push('default_zone_id = ?');
+      values.push(wanted);
+      defaultZoneChanged = true;
+    }
+  }
+
   const moving = !!(zoneMoves && zoneMoves.length);
   if (updates.length > 0 || moving) {
     if (updates.length) {
@@ -1325,10 +1389,13 @@ router.put('/:id', requirePlaylistWrite, (req, res) => {
     })();
     const summary = rulesChanged ? 'Changed smart rules'
       : req.body.playback_order !== undefined ? 'Changed playback order'
-        : (layoutChanged || moving) ? 'Changed layout' : 'Renamed';
+        : (layoutChanged || moving) ? 'Changed layout'
+          : defaultZoneChanged ? 'Changed default zone'
+            : bgChanged ? 'Changed background colour' : 'Renamed';
     require('../lib/revisions').recordCurrent(db, 'playlist', req.params.id, { actor: require('../lib/releases').actorOf(req), summary });
     if (req.body.playback_order !== undefined) markDraft(req.params.id, req, 'Changed playback order');
     if (rulesChanged) markDraft(req.params.id, req, 'Changed smart rules');
+    if (bgChanged) markDraft(req.params.id, req, 'Changed background colour');
     if (layoutChanged || moving) {
       markDraft(req.params.id, req, 'Changed layout');
       require('../lib/audit').auditFromReq(req, 'playlist.layout_changed', {
@@ -1429,6 +1496,7 @@ router.post('/:id/discard', requirePlaylistWrite, (req, res) => {
     // ⚠️ slot_id rides along (a local slot placement, published_structure carries it): without it a
     // discarded corporate draft brought every slot back as an all-NULL ghost item (spec §6.1-1).
     const hasSlots = schemaProbe.hasColumn(db, 'playlist_items', 'slot_id');
+    const hasTransparentBg = schemaProbe.hasColumn(db, 'playlist_items', 'transparent_bg');
     const insert = db.prepare(`INSERT INTO playlist_items (playlist_id, content_id, widget_id, child_playlist_id, zone_id, sort_order, duration_sec, muted, play_from, play_until, enabled, log_play, fit_mode, play_when, weight, repeat_every_sec, play_to_end${hasSlots ? ', slot_id' : ''}) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?${hasSlots ? ', ?' : ''})`);
     const insSched = db.prepare('INSERT INTO playlist_item_schedules (id, playlist_item_id, active_days, start_time, end_time, start_date, end_date, sort_order) VALUES (?,?,?,?,?,?,?,?)');
     const restoredSlots = [];
@@ -1440,6 +1508,8 @@ router.post('/:id/discard', requirePlaylistWrite, (req, res) => {
                    item.enabled === 0 ? 0 : 1, item.log_play === 0 ? 0 : 1, item.fit_mode || null, item.play_when ? (typeof item.play_when === 'string' ? item.play_when : JSON.stringify(item.play_when)) : null, item.weight || 1,
                    item.repeat_every_sec || null, playToEnd.normalizePlayToEnd(item.play_to_end), ...(hasSlots ? [item.slot_id || null] : []));
         if (item.slot_id) restoredSlots.push(item.slot_id);
+        // #660: a see-through item comes back see-through.
+        if (item.transparent_bg && hasTransparentBg) db.prepare('UPDATE playlist_items SET transparent_bg = 1 WHERE id = ?').run(r.lastInsertRowid);
         // 3.0 campaigns: a layout item comes back with its zone sources. A layout or source playlist
         // deleted since is simply not restored (the FK/the check below), like deleted content.
         if (item.layout_ref_id && db.prepare('SELECT 1 FROM layouts WHERE id = ?').get(item.layout_ref_id)) {
@@ -1470,6 +1540,10 @@ router.post('/:id/discard', requirePlaylistWrite, (req, res) => {
     for (const sid of restoredSlots) db.prepare('UPDATE corporate_slots SET retired_at = NULL WHERE id = ?').run(sid);
     // A smart playlist's rules are part of what was published; discarding a rule edit restores them.
     db.prepare("UPDATE playlists SET status = 'published', playback_order = COALESCE(published_playback_order, playback_order, 'sequential'), smart_rules = published_smart_rules, updated_at = strftime('%s','now') WHERE id = ?").run(req.params.id);
+    // #660: and the background colour screens have.
+    if (schemaProbe.hasColumn(db, 'playlists', 'published_background_color')) {
+      db.prepare('UPDATE playlists SET background_color = published_background_color WHERE id = ?').run(req.params.id);
+    }
     // A layout change is part of the draft too: discarding it puts back the layout screens have.
     if (schemaProbe.hasColumn(db, 'playlists', 'published_layout_id')) {
       db.prepare('UPDATE playlists SET layout_id = published_layout_id WHERE id = ?').run(req.params.id);
@@ -1759,6 +1833,7 @@ router.post('/:id/items', requirePlaylistWrite, async (req, res) => {
 
     // #public-api: optional multi-zone placement. Validate the zone belongs to a
     // template or a layout in this playlist's workspace (the agency portal needs this).
+    // Given none, a new item takes the playlist's default zone (lib/playlist-layout.js zoneForNewItem).
     if (zone_id) {
       const zone = db.prepare('SELECT lz.id FROM layout_zones lz JOIN layouts l ON l.id = lz.layout_id WHERE lz.id = ? AND (l.is_template = 1 OR l.workspace_id = ?)').get(zone_id, req.playlist.workspace_id);
       if (!zone) return res.status(400).json({ error: 'zone_id not found in this workspace' });
@@ -1780,7 +1855,7 @@ router.post('/:id/items', requirePlaylistWrite, async (req, res) => {
       INSERT INTO playlist_items (playlist_id, content_id, widget_id, child_playlist_id, zone_id, sort_order, duration_sec, play_to_end)
       VALUES (?, ?, ?, ?, ?, ?, ?, ?)
     `).run(req.params.id, content_id || null, widget_id || null, child_playlist_id || null,
-           zone_id || null, order, duration_sec, playToEndValue);
+           playlistLayout.zoneForNewItem(db, req.params.id, zone_id || null), order, duration_sec, playToEndValue);
 
     // Mark as draft (items changed since last publish)
     markDraft(req.params.id, req, 'Added item');
@@ -1875,10 +1950,12 @@ router.put('/:id/items/:itemId', requirePlaylistWrite, (req, res) => {
     updates.push('zone_id = ?'); values.push(zone_id || null);
   }
   if (duration_sec !== undefined) {
-    // A live stream (video/hls) accepts dwell 0 ("stay until skipped"); finite media must stay
-    // >= 1, because 0 self-loops into a black screen. The item's content mime decides which.
-    const liveItem = !!(item.content_id
-      && db.prepare("SELECT 1 AS live FROM content WHERE id = ? AND mime_type = 'video/hls'").get(item.content_id));
+    // A live stream (HLS, an RTSP camera, HDMI in) accepts dwell 0 ("stay until skipped"); finite
+    // media must stay >= 1, because 0 self-loops into a black screen. The item's content mime
+    // decides which. This used to check video/hls only, so a camera could be ADDED with 0 but never
+    // set back to it.
+    const liveMime = item.content_id && db.prepare('SELECT mime_type FROM content WHERE id = ?').get(item.content_id);
+    const liveItem = !!(liveMime && require('../lib/remote-url').LIVE_MIMES.includes(liveMime.mime_type));
     const minDur = liveItem ? 0 : 1;
     if (typeof duration_sec !== 'number' || duration_sec < minDur) {
       return res.status(400).json({ error: liveItem ? 'duration_sec must be 0 or a positive integer' : 'duration_sec must be a positive integer' });
@@ -1937,6 +2014,17 @@ router.put('/:id/items/:itemId', requirePlaylistWrite, (req, res) => {
       if (!c || !playToEnd.appliesTo(c.mime_type)) return res.status(400).json({ error: 'play_to_end applies to YouTube items only' });
     }
     updates.push('play_to_end = ?'); values.push(on);
+  }
+  // #660 "Transparent background": widgets and HTML bundles only, the items with a page of ours.
+  if (has('transparent_bg')) {
+    const on = backgrounds.normalizeTransparentBg(req.body.transparent_bg);
+    if (on) {
+      const c = item.content_id ? db.prepare('SELECT mime_type FROM content WHERE id = ?').get(item.content_id) : null;
+      if (!backgrounds.transparentApplies({ widget_id: item.widget_id, mime_type: c && c.mime_type })) {
+        return res.status(400).json({ error: 'transparent_bg applies to widgets and HTML bundles only' });
+      }
+    }
+    updates.push('transparent_bg = ?'); values.push(on);
   }
   /*
    * ⚠️ #129's per-item mute, which this route never read.
@@ -2052,6 +2140,7 @@ router.post('/:id/items/:itemId/duplicate', requirePlaylistWrite, (req, res) => 
       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
     `).run(req.params.id, item.content_id, item.widget_id, item.child_playlist_id, item.zone_id, order, item.duration_sec, item.play_from || null, item.play_until || null, item.muted ? 1 : 0, item.enabled === 0 ? 0 : 1, item.log_play === 0 ? 0 : 1, item.fit_mode || null, item.play_when || null, item.weight || 1, item.repeat_every_sec || null, playToEnd.normalizePlayToEnd(item.play_to_end));
     const newId = result.lastInsertRowid;
+    if (item.transparent_bg) db.prepare('UPDATE playlist_items SET transparent_bg = 1 WHERE id = ?').run(newId);   // #660
     const scheds = db.prepare('SELECT active_days, start_time, end_time, start_date, end_date, sort_order FROM playlist_item_schedules WHERE playlist_item_id = ?').all(req.params.itemId);
     const insSched = db.prepare('INSERT INTO playlist_item_schedules (id, playlist_item_id, active_days, start_time, end_time, start_date, end_date, sort_order) VALUES (?,?,?,?,?,?,?,?)');
     for (const s of scheds) insSched.run(uuidv4(), newId, s.active_days, s.start_time, s.end_time, s.start_date, s.end_date, s.sort_order);
@@ -2090,7 +2179,7 @@ router.post('/:id/items/:itemId/duplicate', requirePlaylistWrite, (req, res) => 
 const MAX_SELECTION = 500;
 const SELECTION_ACTIONS = new Set([
   'delete', 'duplicate', 'duration', 'play_window', 'enabled', 'log_play',
-  'fit_mode', 'mute', 'schedules', 'play_when', 'transition', 'paste', 'weight', 'play_to_end',
+  'fit_mode', 'mute', 'schedules', 'play_when', 'transition', 'paste', 'weight', 'play_to_end', 'transparent_bg',
 ]);
 
 function loadSelectionItems(playlistId, ids) {
@@ -2184,6 +2273,9 @@ router.post('/:id/items/selection', requirePlaylistWrite, (req, res) => {
             fit, when ? JSON.stringify(when) : null, it.weight || 1, normalizeRepeatEvery(it.repeat_every_sec) || null,
             playToEnd.normalizePlayToEnd(it.play_to_end));
           added.push(r.lastInsertRowid);
+          if (backgrounds.normalizeTransparentBg(it.transparent_bg) && backgrounds.transparentApplies(it.widget_id ? it : { mime_type: (db.prepare('SELECT mime_type FROM content WHERE id = ?').get(it.content_id || '') || {}).mime_type })) {
+            db.prepare('UPDATE playlist_items SET transparent_bg = 1 WHERE id = ?').run(r.lastInsertRowid);   // #660
+          }
           const blocks = Array.isArray(it.schedules) ? it.schedules : [];
           blocks.forEach((b, i) => {
             // days must be NON-EMPTY: an empty array stores active_days='' and the evaluator treats
@@ -2237,6 +2329,7 @@ router.post('/:id/items/selection', requirePlaylistWrite, (req, res) => {
             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`).run(
             req.params.id, r.content_id, r.widget_id, r.child_playlist_id, r.zone_id, order, r.duration_sec,
             r.play_from, r.play_until, r.muted ? 1 : 0, r.enabled === 0 ? 0 : 1, r.log_play === 0 ? 0 : 1, r.fit_mode, r.play_when, r.weight || 1, r.repeat_every_sec || null, playToEnd.normalizePlayToEnd(r.play_to_end));
+          if (r.transparent_bg) db.prepare('UPDATE playlist_items SET transparent_bg = 1 WHERE id = ?').run(result.lastInsertRowid);   // #660
           const scheds = db.prepare('SELECT active_days, start_time, end_time, start_date, end_date, sort_order FROM playlist_item_schedules WHERE playlist_item_id = ?').all(r.id);
           const insSched = db.prepare('INSERT INTO playlist_item_schedules (id, playlist_item_id, active_days, start_time, end_time, start_date, end_date, sort_order) VALUES (?,?,?,?,?,?,?,?)');
           for (const s of scheds) insSched.run(uuidv4(), result.lastInsertRowid, s.active_days, s.start_time, s.end_time, s.start_date, s.end_date, s.sort_order);
@@ -2299,6 +2392,17 @@ router.post('/:id/items/selection', requirePlaylistWrite, (req, res) => {
       const up = db.prepare("UPDATE playlist_items SET play_to_end = ?, updated_at = strftime('%s','now') WHERE id = ?");
       db.transaction(() => { for (const r of target) up.run(on, r.id); })();
       if (target.length) markDraft(req.params.id, req, `Set play to end on ${target.length} item(s)`);
+      return res.json({ updated: target.length, skipped: rows.length - target.length });
+    }
+
+    // #660: "Transparent background" across a selection; only widgets and HTML bundles change.
+    if (action === 'transparent_bg') {
+      const on = backgrounds.normalizeTransparentBg(req.body.transparent_bg);
+      const mimeOf = db.prepare('SELECT mime_type FROM content WHERE id = ?');
+      const target = rows.filter((r) => backgrounds.transparentApplies({ widget_id: r.widget_id, mime_type: r.content_id ? (mimeOf.get(r.content_id) || {}).mime_type : null }));
+      const up = db.prepare("UPDATE playlist_items SET transparent_bg = ?, updated_at = strftime('%s','now') WHERE id = ?");
+      db.transaction(() => { for (const r of target) up.run(on, r.id); })();
+      if (target.length) markDraft(req.params.id, req, `Set transparent background on ${target.length} item(s)`);
       return res.json({ updated: target.length, skipped: rows.length - target.length });
     }
 
@@ -2467,6 +2571,7 @@ router.post('/:id/items/bulk', requirePlaylistWrite, async (req, res) => {
       const max = db.prepare('SELECT MAX(sort_order) as max_order FROM playlist_items WHERE playlist_id = ?')
         .get(req.params.id);
       let order = (max.max_order || 0) + 1;
+      const zid = playlistLayout.zoneForNewItem(db, req.params.id, zone_id || null);
       const ins = db.prepare(`
         INSERT INTO playlist_items (playlist_id, content_id, widget_id, child_playlist_id, zone_id, sort_order, duration_sec, play_to_end)
         VALUES (?, ?, NULL, NULL, ?, ?, ?, ?)
@@ -2476,7 +2581,7 @@ router.post('/:id/items/bulk', requirePlaylistWrite, async (req, res) => {
       // failure halfway must not leave half a party in the playlist.
       db.transaction(() => {
         for (const r of ready) {
-          ids.push(ins.run(req.params.id, r.content_id, zone_id || null, order++, r.duration_sec, r.play_to_end || null).lastInsertRowid);
+          ids.push(ins.run(req.params.id, r.content_id, zid, order++, r.duration_sec, r.play_to_end || null).lastInsertRowid);
         }
       })();
 
