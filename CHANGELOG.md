@@ -4,6 +4,21 @@
 
 ### Added
 
+- **ONVIF cameras** (docs/onvif-cameras.md). **Add content → ONVIF camera**:
+  - Find cameras on the network, or type an address. Sign in, pick a stream, and add it as a live
+    stream every RTSP-capable screen already plays.
+  - The camera's snapshot becomes the thumbnail.
+  - The item's Edit dialog can ask for a new snapshot or a new stream address, change the stored
+    password and, on a PTZ camera, pan, tilt, zoom, go home and go to presets. A held arrow
+    moves; the camera stops by itself if a stop is lost.
+  - A hosted server reaches the cameras through a **screen on their network**: Android and the
+    Raspberry Pi / Windows player relay three narrow operations (discovery, a SOAP request, a
+    snapshot), private addresses only, size-capped. A self-hosted server can talk to them itself
+    when `OUTBOUND_ALLOW_PRIVATE` / `OUTBOUND_ALLOW_HOSTS` opens the LAN.
+  - The camera password is stored encrypted and never sent back to a browser.
+  - Works with WS-Security and HTTP Digest, Media and Media2, and cameras with the wrong clock.
+  - Additive columns `content.onvif` and `content.onvif_secret`. New player capability
+    `onvif.bridge`.
 - **Weather in your language** (#667, requested by @djalfe). A Weather data source's language now
   translates the weather conditions ("Mainly clear") and the template's words ("Feels like",
   "Humidity", "Today", "Updated", the chance of precipitation), not only the day names. Language
