@@ -5244,6 +5244,7 @@ export default {
   'slides.slide.delete': "このスライドを削除",
   'slides.slide.last_one': "デッキには少なくとも1枚のスライドが必要です",
   'slides.edit.add_hint': "ツールバーから要素を追加してください。",
+  'data_sources.weather_locale_label': '天気の言語',
   // Reports (uptime by client, CSV export), content request place picker, alerts intro
   'alerts.intro': "画面がオフラインになったときや問題（空白、フリーズ、誤ったコンテンツ、パネルオフ）を表示したとき、そして復旧したときにチームへ通知します。各チャンネルはインシデントごとに1件のメッセージを送信します。",
   'report.export_failed': "エクスポートできませんでした: {error}",

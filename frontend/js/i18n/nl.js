@@ -6211,6 +6211,7 @@ export default {
   'slides.slide.last_one': "Een deck heeft minstens één dia nodig",
   'slides.edit.add_hint': "Voeg een element toe via de werkbalk.",
   'slides.ai.done': "{n} elementen gegenereerd — Ongedaan maken haalt de oude dia terug; sla alleen op als je tevreden bent",
+  'data_sources.weather_locale_label': 'Taal van het weer',
   // Reports (uptime by client, CSV export), content request place picker, alerts intro
   'alerts.intro': "Laat je team weten wanneer een scherm offline gaat of een probleem toont (leeg, bevroren, verkeerde inhoud, paneel uit), en opnieuw wanneer het weer in orde is. Elk kanaal stuurt één bericht per incident.",
   'report.export_failed': "Exporteren mislukt: {error}",

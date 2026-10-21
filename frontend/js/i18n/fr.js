@@ -5244,6 +5244,7 @@ export default {
   'slides.slide.delete': "Supprimer cette diapositive",
   'slides.slide.last_one': "Une présentation doit contenir au moins une diapositive",
   'slides.edit.add_hint': "Ajoutez un élément depuis la barre d'outils.",
+  'data_sources.weather_locale_label': 'Langue de la météo',
   // Reports (uptime by client, CSV export), content request place picker, alerts intro
   'alerts.intro': "Prévenez votre équipe quand un écran passe hors ligne ou affiche un problème (vide, figé, mauvais contenu, dalle éteinte), puis quand tout est rentré dans l'ordre. Chaque canal envoie un message par incident.",
   'report.export_failed': "Échec de l'export : {error}",

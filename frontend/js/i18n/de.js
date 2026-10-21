@@ -4616,6 +4616,7 @@ export default {
   'slides.slide.delete': "Diese Folie löschen",
   'slides.slide.last_one': "Ein Deck braucht mindestens eine Folie",
   'slides.edit.add_hint': "Fügen Sie über die Werkzeugleiste ein Element hinzu.",
+  'data_sources.weather_locale_label': 'Sprache für das Wetter',
   // Reports (uptime by client, CSV export), content request place picker, alerts intro
   'alerts.intro': "Benachrichtigen Sie Ihr Team, wenn ein Bildschirm offline geht oder ein Problem zeigt (leer, eingefroren, falscher Inhalt, Display aus), und erneut, wenn alles wieder in Ordnung ist. Jeder Kanal sendet eine Nachricht pro Vorfall.",
   'report.export_failed': "Export fehlgeschlagen: {error}",

@@ -4155,6 +4155,7 @@ export default {
   'slides.slide.delete': "删除此幻灯片",
   'slides.slide.last_one': "演示至少需要一张幻灯片",
   'slides.edit.add_hint': "从工具栏添加一个元素。",
+  'data_sources.weather_locale_label': '天气语言',
   // Reports (uptime by client, CSV export), content request place picker, alerts intro
   'alerts.intro': "当屏幕离线或显示问题（空白、卡住、内容错误、面板关闭）时通知你的团队，恢复时再次通知。每个渠道每次事件发送一条消息。",
   'report.export_failed': "无法导出：{error}",

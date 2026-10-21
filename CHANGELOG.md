@@ -4,6 +4,10 @@
 
 ### Fixed
 
+- **Danish (and every other weather language) can be chosen for a Weather data source** (#667, reported by
+  @djalfe). 3.0.2 shipped Danish weather words, but the form's language list was the dashboard's own,
+  which has no Danish. It now lists every language the weather supports, each in its own name, and the
+  label says **Weather language** instead of "Language for day names".
 - **Test on a table hook no longer changes the table.** The test sends an empty list of rows, so
   testing a "Replace all rows" hook emptied the table without asking. A table hook's test is now a
   dry run that says what it would do; real calls to the hook are unchanged.

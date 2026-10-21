@@ -4490,6 +4490,7 @@ export default {
   'slides.slide.delete': "Elimina questa slide",
   'slides.slide.last_one': "Una presentazione deve avere almeno una slide",
   'slides.edit.add_hint': "Aggiungi un elemento dalla barra degli strumenti.",
+  'data_sources.weather_locale_label': 'Lingua del meteo',
   // Reports (uptime by client, CSV export), content request place picker, alerts intro
   'alerts.intro': "Avvisa il tuo team quando uno schermo va offline o mostra un problema (vuoto, bloccato, contenuto sbagliato, pannello spento), e di nuovo quando torna a posto. Ogni canale invia un messaggio per incidente.",
   'report.export_failed': "Esportazione non riuscita: {error}",
