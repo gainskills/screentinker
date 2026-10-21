@@ -97,6 +97,11 @@
 
 ### Fixed
 
+- **The playlist editor no longer looks as if Publish lost your work.** After **Publish** (or
+  **Discard changes**) the editor redrew from a shorter answer than a page load gets, so until a
+  reload the Layout row said "Each screen's own layout", the Default zone row and every Zone picker
+  were gone, and items lost their schedule chip and clock icon. Screens and the saved playlist were
+  always fine. Publish and discard now answer with exactly what `GET /api/playlists/:id` returns.
 - **A white-labelled workspace is no longer told to install an app under its own brand.** The
   Settings Setup Guide said "Install the <Brand> APK" and the empty Screens page "Open the <Brand>
   player on a TV", but the installed apps (Android/Fire TV, Tizen, webOS, Roku, iOS, the native Pi
