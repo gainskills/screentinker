@@ -97,6 +97,11 @@
 
 ### Fixed
 
+- **A screen's Default Content now shows on the web player** (Device Info → Settings → Default
+  Content). The picture was put on the page but the "Waiting for content..." card stayed on top
+  of it, so it was never seen. **Save Settings** also now sends the change to a screen that is
+  already on, instead of it waiting for the screen to reconnect; that goes for orientation and
+  background colour too.
 - **Creating an account from an invite link lands in the invited workspace.** Someone who opened
   the link signed out and then signed up (or signed in) was added to the workspace, but the page
   reloaded mid-switch: they started in their own workspace instead, and a new account on a hosted
