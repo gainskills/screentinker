@@ -2,8 +2,40 @@
 
 ## 3.0.2
 
+### Upgrade notes
+
+- **Still on 2.x and your news ticker says "Feed unavailable"? Upgrade.** Before 3.0 the ticker read
+  every feed through a third-party converter (rss2json), which rate-limits and refuses some valid
+  feeds, so a ticker can work for a while and then stop. Since 3.0 your own server reads the feed;
+  existing ticker widgets switch over by themselves.
+- **Upgrading from 2.x: run the new upgrade script, and install `sqlite3` first.** The copy of
+  `scripts/upgrade.sh` that runs is the one from the release you are leaving. Before 3.0.2 it stops
+  silently right after "Backing up db" when the `sqlite3` tool is not installed, and the 2.x copy
+  does not know that 3.0 needs Node 22. So:
+  ```
+  sudo apt install sqlite3
+  git fetch --tags origin
+  git show v3.0.2:scripts/upgrade.sh > /tmp/upgrade.sh
+  APP_DIR=/path/to/screentinker bash /tmp/upgrade.sh
+  ```
+  The new script checks for local changes, `sqlite3` and Node before it changes anything, and
+  offers to install what is missing.
+- **RSS, cloud document and BI dashboard widgets with no saved colour were black and are now
+  transparent.** Full screen they look the same, over the screen's background colour (black unless one
+  is set). In a layout zone over other content, that content now shows through the widget. To keep a
+  widget black, untick **Transparent** and pick black. A widget whose colour was already saved,
+  including the #000000 the old picker saved, keeps that colour.
+
 ### Added
 
+- **Eight user guides, each with a video** (screentinker.com/guides, #681, #690): getting started,
+  content & playlists, scheduling, layouts & zones, groups & video walls, users & roles, white-label,
+  and troubleshooting a screen. Written for whoever runs the screens, not for developers, with
+  callouts where a self-hosted server differs. Each page embeds its walkthrough video.
+- **Workspace admins can brand their own workspace** (#682). On an Enterprise plan, **Settings →
+  White Label / Branding** now shows for org owners and admins and the workspace's own admins, not only
+  the platform team, and the Enterprise check uses the organization owner's plan. Custom Domain and
+  Custom CSS stay platform-admin only.
 - **Several presenters at once on Android screens.** The Android player shows up to four screen
   shares tiled, like the web player. It follows the room's spotlight (one presenter full screen,
   the others kept connected) and plays only the chosen presenter's sound. The playlist comes back
@@ -53,6 +85,9 @@
   `day0_precip_text`. The **Weather forecast** template 1.1.0 (needs server 3.0.2) and **Weather —
   animated** 1.1.0 use them; the animated one falls back to English on an older server.
 
+- **Portuguese (Brazil) and Spanish are fully translated.** The dashboard's pt-BR went from about
+  half translated to complete, with one vocabulary throughout (#661, by @lucianocosta), and Spanish
+  now covers every string (#668, by @neorai).
 - **A default zone for a playlist.** Under the playlist's **Layout**, pick the zone that **new** items
   go to when they're added without one (from the Manager app, the API, Make a sign, content requests,
   agency uploads, cloud folders...). It replaces the layout's main zone for that playlist's new items
@@ -166,7 +201,8 @@
 - **"Pairing code expired" now says what helps.** It told people to "restart the display to get a
   new code", which cannot work: a restarted player shows the same code. It now says the screen has
   not been online for over 15 minutes and to get it back online, then type the code again.
-- **Create Account asks for 8 characters, like the server.** The form said "At least 6 characters"
+- **Create Account asks for 8 characters, like the server** (#691, reported by @samuelson-ben in
+  #696). The form said "At least 6 characters"
   and let a 6- or 7-character password through, which the server then refused. In every language.
 - **The setup guide's "No device found with that pairing code" goes away when you edit the code**,
   instead of staying under the box while the corrected code is typed.
@@ -222,7 +258,7 @@
   It was a 404 (and `/guides` redirected into it), and every guide's "Guides" breadcrumb went to the
   home page instead. A guide, integration or solution address typed without `.html` now redirects to
   the page rather than answering 404. The hub is in the sitemap and `llms.txt`.
-- **The web player uses the instance's branding** (#674). On a white-labelled instance, `/player`
+- **The web player uses the instance's branding** (#674, reported by @freefos). On a white-labelled instance, `/player`
   still said "ScreenTinker" on the tap-to-start screen, the status and setup screens, the info
   overlay and the tab title. It now shows the brand name instead: the one for the hostname before a
   screen is paired, then the brand of the workspace it's paired to (`device:paired` carries it, and
@@ -303,30 +339,23 @@
   looks like one (16+ letters and digits, mixed case) is shown as `********` and kept on edit, by the
   same rules as a password.
 - The Android and native players no longer write a camera's password or share token to their logs.
+- **The native Windows and macOS players use aiohttp 3.14.4** (#676), which fixes GHSA-2g87-pp6c-29x5
+  and GHSA-5wr8-gcqf-gqf3 (high: unbounded memory/CPU use, no first-request timeout) and
+  GHSA-494j-54xm-rwp3 (low). The server, Docker image, and Android, web, Tizen and Roku players are not
+  affected; the Pi `.deb` uses Debian's own aiohttp.
 
-### Upgrade notes
+### Contributors
 
-- **Still on 2.x and your news ticker says "Feed unavailable"? Upgrade.** Before 3.0 the ticker read
-  every feed through a third-party converter (rss2json), which rate-limits and refuses some valid
-  feeds, so a ticker can work for a while and then stop. Since 3.0 your own server reads the feed;
-  existing ticker widgets switch over by themselves.
-- **Upgrading from 2.x: run the new upgrade script, and install `sqlite3` first.** The copy of
-  `scripts/upgrade.sh` that runs is the one from the release you are leaving. Before 3.0.2 it stops
-  silently right after "Backing up db" when the `sqlite3` tool is not installed, and the 2.x copy
-  does not know that 3.0 needs Node 22. So:
-  ```
-  sudo apt install sqlite3
-  git fetch --tags origin
-  git show v3.0.2:scripts/upgrade.sh > /tmp/upgrade.sh
-  APP_DIR=/path/to/screentinker bash /tmp/upgrade.sh
-  ```
-  The new script checks for local changes, `sqlite3` and Node before it changes anything, and
-  offers to install what is missing.
-- **RSS, cloud document and BI dashboard widgets with no saved colour were black and are now
-  transparent.** Full screen they look the same, over the screen's background colour (black unless one
-  is set). In a layout zone over other content, that content now shows through the widget. To keep a
-  widget black, untick **Transparent** and pick black. A widget whose colour was already saved,
-  including the #000000 the old picker saved, keeps that colour.
+- @lucianocosta: the complete Portuguese (Brazil) translation, 1 of the 32 commits in this release (#661).
+- @neorai: the complete Spanish translation, 1 of the 32 commits in this release (#668).
+- @freefos reported the web player ignoring white-label branding (#674); @djalfe reported empty and
+  see-through zones (#666, #660) and asked for weather in their language (#667); @samuelson-ben
+  reported the 6-vs-8 character password (#696).
+
+### Sponsors
+
+Thank you to @Semetra22 and @hapishyguy for sponsoring ScreenTinker on GitHub Sponsors, and to everyone
+who sponsors privately.
 
 ## 3.0.1
 

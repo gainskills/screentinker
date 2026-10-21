@@ -14,6 +14,17 @@
   ],
   "releases": [
     {
+      "version": "3.0.2",
+      "date": "2026-10-21",
+      "notes": [
+        "New step-by-step guides with videos at screentinker.com/guides: your first screen, playlists, scheduling, layouts and zones, groups and video walls, your team, white-labelling, and fixing a screen that misbehaves.",
+        "Add ONVIF security cameras, including pan, tilt and zoom, plus encrypted RTSPS streams such as UniFi Protect links, and show fisheye cameras as a normal view you can steer. Camera passwords are never shown back in the dashboard.",
+        "Weather shows in your language, Portuguese (Brazil) and Spanish are fully translated, and workspace admins on Enterprise can brand their own workspace. The web player now uses your white-label brand too.",
+        "Many fixes from writing the guides: a screen's Default Content shows on the web player, Simple view's Replace really replaces, invite links open the right workspace, and pairing and sign-up messages say what actually helps.",
+        "Upgrading from 2.x? Install the sqlite3 tool first and run the new upgrade script. If a 2.x news ticker says Feed unavailable, upgrading fixes it: your own server now reads the feed."
+      ]
+    },
+    {
       "version": "3.0.1",
       "date": "2026-10-16",
       "notes": [
