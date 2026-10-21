@@ -97,6 +97,34 @@
 
 ### Fixed
 
+- **Video wall tiles for web players start at the panel's real size.** The web player (browsers,
+  Tizen, webOS, BrightSign, Vega) never reported the size it draws at, so the wall editor gave
+  every such panel a 320x180 placeholder tile. It now reports it, and again after an
+  orientation change or window resize. Walls already saved keep their tile sizes.
+- **A group's Sync line names the protocol the way the Sync menu does.** With **Sync: Auto** it
+  read "screentinker — mixed fleet", printing the internal id, and called three identical web
+  players a mixed fleet. It now says "Standard — not every screen is a BrightSign" (or the reason
+  that applies), in the dashboard's language. `GET/PUT /api/groups` add `sync_reason_code` and
+  `sync_reason_count`; `sync_reason` stays English.
+- **Clicking a screen on a new video wall selects the screen, not the player.** Create Video Wall
+  (and **Fit player to screens**) lays the player exactly over the screens, so every click on a
+  panel picked up the player. A press on the player now goes to the screen beneath it; drag the
+  player by its PLAYER label or a corner handle (or use Fine position).
+- **The video wall flow is translated.** Create Video Wall's prompts and toasts, the editor's
+  toolbar, Fine position, the mounting choices, the Panels list and the How it works card were
+  English in every language.
+- **The wall's bezel fields say what unit they are.** H/V Bezel are canvas pixels (the gap
+  Auto-arrange leaves between panels), as their label says, although the API fields are named
+  `bezel_h_mm` / `bezel_v_mm`. The hint under them and the API docs now say so; nothing is stored
+  differently.
+- **The group bar no longer squeezes at 1440 px wide.** With the Auto: badge and the Sync controls
+  showing, the group name broke over two lines and the badges stacked; the bar now wraps onto a
+  second line instead.
+- **The group Set Playlist toast counts only the screens that play it.** It said "Playlist assigned
+  to 2 devices" when one of them kept its own playlist. It now says how many play it and how many
+  keep another playlist (their own, a schedule's, a wall's or a higher-priority group's), and the
+  confirmation no longer says it goes to all devices. `POST /api/groups/:id/assign-playlist`
+  `devices_updated` is that count, with `devices_overridden` for the rest.
 - **`scripts/upgrade.sh` no longer stops silently on a host without the `sqlite3` tool.** The
   server has SQLite built in, but the pre-upgrade backup uses the `sqlite3` shell; without it the
   script ended right after "Backing up db" with no message. It now checks first, offers to install
