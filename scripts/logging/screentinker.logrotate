@@ -1,4 +1,4 @@
-# The app reopens SECURITY_LOG on every append, so a plain rename/create rotation is safe.
+# The app reopens the file for each write, so rotation does not need copytruncate.
 /var/log/screentinker/security.log {
     weekly
     maxsize 10M
@@ -7,6 +7,6 @@
     notifempty
     compress
     delaycompress
-    # No owner/group: the new file keeps the old one's, so the non-root service can still append.
+    # Keep the owner and group so the service user can still write after rotation.
     create 0640
 }

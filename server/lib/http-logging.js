@@ -1,14 +1,13 @@
 'use strict';
 
-// Access records go to the console (journald / docker logs keep working unchanged).
-// Security events go ONLY to the file named by SECURITY_LOG, and only
-// authenticationFailure() writes there, from validated fields. No console or other
-// untrusted text can reach that file, so nothing needs escaping globally.
+// Access records go to the console. authenticationFailure() writes checked fields
+// to a separate SECURITY_LOG file, so console text cannot become a Fail2ban event.
 const fs = require('node:fs');
 const net = require('node:net');
 const writeStdout = line => process.stdout.write(line);
-// Unset SECURITY_LOG = no security file (fail2ban is opt-in). Appends reopen the path each
-// time, so logrotate's rename/create rotation works without copytruncate.
+// Off unless SECURITY_LOG is set. appendFile creates the file, not its directory;
+// the service user needs write access. Each append reopens the path for rotation.
+// Errors are silently ignored; verify a failed login reaches the file after setup.
 const writeSecurityLog = line => {
   const file = process.env.SECURITY_LOG;
   if (file) fs.appendFile(file, line, { mode: 0o640 }, () => { /* best effort */ });
@@ -27,7 +26,7 @@ function authenticationFailure(ip, method, { write = writeSecurityLog } = {}) {
   if (!address || !Object.values(AUTH_METHOD).includes(method)) return;
   try {
     write(`${new Date().toISOString()} [security] auth_failure ip=${address} method=${method}\n`);
-  } catch (_) { /* observability must not change the authentication outcome */ }
+  } catch (_) { /* a logging error must not affect the login response */ }
 }
 
 function accessLogger({ getClientIp, write = writeStdout } = {}) {

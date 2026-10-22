@@ -465,18 +465,55 @@ before relying on it.
 
 ## Fail2ban (optional)
 
-Failed password and TOTP logins can be written to a dedicated file for fail2ban. It is off
-unless `SECURITY_LOG` is set. Only the login-failure path writes to it, with a validated IP, so
-console output and journald are unchanged and no other text can reach the file.
+Fail2ban reads failed password/TOTP logins from `SECURITY_LOG` and temporarily bans
+the source IP. The supplied jail bans after 10 failures within 10 minutes and
+automatically unbans after 15 minutes. Logging and the jail are off by default.
+
+A ban applies to all clients sharing that public IP, including working devices
+behind the same router. The local firewall action blocks the configured ports;
+the Cloudflare action blocks access across the configured zone. Leave the jail
+disabled if that could interrupt devices that need to stay connected.
+
+[Account security](../frontend/guides/digital-signage-users-roles.html#sign-in) works independently: use strong, unique passwords and enable
+**Settings → Two-factor authentication** for password accounts. For SSO, configure
+MFA with the identity provider. [Passkeys](passkeys.md) are also available.
+
+Install Fail2ban and logrotate. From the repository root, replace `screentinker` with
+the app's service user and run:
 
 ```bash
-sudo install -d -o <service user> -m 0750 /var/log/screentinker
-# add to the service environment: SECURITY_LOG=/var/log/screentinker/security.log
+service_user=screentinker
+sudo install -d -o "$service_user" -g "$(id -gn "$service_user")" -m 0750 /var/log/screentinker
 sudo install -m 0644 scripts/logging/screentinker.logrotate /etc/logrotate.d/screentinker
 sudo install -m 0644 scripts/logging/fail2ban-filter.conf /etc/fail2ban/filter.d/screentinker.conf
 sudo install -m 0644 scripts/logging/fail2ban-jail.local /etc/fail2ban/jail.d/screentinker.local
 ```
 
-The jail ships disabled; choose its `action` and ports (see the comments in the file), check
-`fail2ban-regex /var/log/screentinker/security.log screentinker`, then set `enabled = true`.
-`ACCESS_LOG=true` additionally prints one JSON access record per request to the console.
+Set `SECURITY_LOG=/var/log/screentinker/security.log` in the service environment and restart.
+Systemd needs `Environment=` or `EnvironmentFile=`; `npm start` reads `server/.env`.
+If you use another path, update the jail and logrotate to match.
+The app creates the file on the first failed login, but does not create directories.
+The service user needs write access to the directory and any existing log.
+Console logs stay in journald or Docker; `ACCESS_LOG` is independent of Fail2ban.
+
+Write errors are silently ignored. Try an incorrect password, then check the log and filter:
+
+```bash
+sudo tail /var/log/screentinker/security.log
+sudo fail2ban-regex /var/log/screentinker/security.log /etc/fail2ban/filter.d/screentinker.conf
+```
+
+Check rotation with `sudo logrotate -f /etc/logrotate.d/screentinker`, then confirm another
+failed login reaches the new file. Logging and filter tests work with the jail disabled.
+
+To enable bans, choose the jail's action and ports using its comments, then set
+`enabled = true`. Cloudflare Tunnel/proxied DNS needs the Cloudflare action and API
+credentials. Run `sudo fail2ban-client -t`; if it passes, reload Fail2ban.
+
+For Cloudflare, use an API token authorized to create, list and delete IP Access
+rules for the configured zone. Set `cfzone` and `cftoken` in
+`/etc/fail2ban/action.d/screentinker-cloudflare.local` under `[Init]`, owned by root
+with mode `0600`. See Cloudflare's [token setup](https://developers.cloudflare.com/fundamentals/api/get-started/create-token/),
+[current permissions](https://developers.cloudflare.com/fundamentals/api/reference/permissions/)
+and [IP Access rules API](https://developers.cloudflare.com/api/resources/firewall/subresources/access_rules/)
+for changes to the requirements. The token must remain valid for automatic unbanning.

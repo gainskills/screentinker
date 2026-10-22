@@ -69,8 +69,8 @@ function ensureDefaultOrgForUser(user, { allowCreate = true } = {}) {
 const nowSec = () => Math.floor(Date.now() / 1000);
 
 function logFailedLogin(email, ip, reason, method = null) {
-  // Callers explicitly mark credential failures; policy refusals stay audit-only.
-  // Human-readable audit wording must not determine whether an address is banned.
+  // Pass a method for password/TOTP failures that should count toward a ban.
+  // Other refusals stay in the audit log; do not decide this from the reason text.
   if (method) authenticationFailure(ip, method);
   try {
     db.prepare('INSERT INTO activity_log (user_id, action, details, ip_address) VALUES (NULL, ?, ?, ?)')

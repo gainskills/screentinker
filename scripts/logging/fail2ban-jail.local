@@ -1,25 +1,28 @@
-# Install as /etc/fail2ban/jail.d/screentinker.local; select/test the enforcement
-# action for your firewall/proxy topology before changing enabled to true.
-# One jail for all deployments; choose ONE action below.
+# Install as /etc/fail2ban/jail.d/screentinker.local.
+# Choose and test one action below before setting enabled = true.
+# Bans apply to the IP and can also block working devices sharing that public IP.
 [screentinker]
 enabled = false
 filter = screentinker
-# Written only by the app's authenticationFailure(); set SECURITY_LOG to this path.
+# Optional: set SECURITY_LOG to this path to enable failed-login logging.
+# You (the server administrator) must create /var/log/screentinker and give the user
+# running the app write access to it and any existing security.log. The app creates the file.
+# Setup: docs/operations.md#fail2ban-optional
 logpath = /var/log/screentinker/security.log
 backend = auto
 usedns = no
-# Default app HTTP listener. Match these to the ports actually exposed publicly.
-# App TLS enabled: port = 3001,3443 (HTTP redirect + HTTPS), or your custom ports.
-# Public nginx/Caddy: use the proxy's listening ports (see docs/operations.md).
+# Match the ports users connect to. The app's default HTTP port is 3001.
+# With app TLS, use port = 3001,3443 (HTTP redirect + HTTPS), or your custom ports.
+# With Nginx/Caddy, use the proxy's public ports.
 # Caddy HTTP/3 also needs protocol = tcp,udp.
 port = 3001
 protocol = tcp
 findtime = 10m
 maxretry = 10
 bantime = 15m
-# Native/public nginx or Caddy on this host: requires nftables and the INPUT path.
+# Local firewall: requires nftables and traffic through this host's INPUT chain.
 action = nftables[type=multiport, name=screentinker, port="%(port)s", protocol="%(protocol)s"]
-# Cloudflare Tunnel/proxied DNS: REPLACE the action above with this one after
-# installing examples/fail2ban-cloudflare-action.conf and its local credentials.
-# The Cloudflare action ignores port/protocol: its ban applies at the zone level.
+# Cloudflare Tunnel/proxied DNS: replace the action above with this one.
+# First install examples/fail2ban-cloudflare-action.conf and its credentials file.
+# This action ignores port/protocol and bans the IP across the Cloudflare zone.
 # action = screentinker-cloudflare
