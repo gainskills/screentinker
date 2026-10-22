@@ -185,7 +185,9 @@ router.post('/:id/rotate', (req, res) => {
 /*
  * Test-fire: runs the hook for real with the body given (or a representative one), marked as a test
  * in the call log. It is not a dry run — a test of an emergency hook shows the alert on screens, so
- * the page says so and offers the clear straight after.
+ * the page says so and offers End now (POST /:id/end) while the hook has something live. The one
+ * exception is a table hook: its test is a dry run (lib/automation/hooks.js runData), because the
+ * sample body is an empty list and a "Replace all rows" hook run for real with it empties the table.
  */
 router.post('/:id/test', asyncRoute(async (req, res) => {
   if (!access(req, res, { write: true })) return;
@@ -198,11 +200,41 @@ router.post('/:id/test', asyncRoute(async (req, res) => {
   res.status(r.ok ? 200 : 422).json({ ok: r.ok, outcome: r.outcome });
 }));
 
+/*
+ * End now: take down what a hook has live — the alerts it raised and the screens it switched — the
+ * same as switching it off (PUT above), but the hook stays on. A test's clear, and a manual one.
+ */
+router.post('/:id/end', (req, res) => {
+  if (!access(req, res, { write: true })) return;
+  const h = loadHook(req, res); if (!h) return;
+  hooks.endAll(db, h);
+  require('../lib/automation/overrides').stop(db, { workspaceId: h.workspace_id, hookId: h.id });
+  logActivity(req.user.id, 'automation:hook_ended', `${h.name} (${h.kind})`, null, getClientIp(req), req.workspaceId);
+  res.json(present(req, db.prepare('SELECT * FROM automation_hooks WHERE id = ?').get(h.id)));
+});
+
 function sampleBody(h) {
   if (h.kind === 'emergency') return { id: 'test-1', headline: 'Test alert', message: 'This is a test of the emergency hook.', status: 'active' };
   if (h.kind === 'mass_notification') return { alertId: 'test-1', title: 'Test alert', message: 'This is a test of the mass notification hook.', status: 'active' };
-  if (h.kind === 'data') return [];
+  if (h.kind === 'data') return sampleDataBody(h);
   return {};
+}
+
+/*
+ * A table hook's test body: ONE sample row, built from the table's own columns and put where the hook's
+ * Rows field reads from ({{body.items}} -> { items: [row] }, {{body}} -> [row]). It used to be an empty
+ * list, so the guide's own example (Rows: {{body.items}}) failed with "No rows in the body" before the
+ * dry run (#703) could say what a real call would do. A test is a dry run, so the sample never lands.
+ */
+function sampleDataBody(h) {
+  const cfg = hooks.parseConfig(h) || {};
+  const ds = db.prepare('SELECT config FROM data_sources WHERE id = ? AND workspace_id = ?').get(cfg.data_source_id || '', h.workspace_id);
+  let columns = [];
+  try { columns = (JSON.parse((ds && ds.config) || '{}').columns || []).map(String); } catch { /* no columns: runData says so */ }
+  const row = Object.fromEntries(columns.map((c) => [c, `sample ${c}`]));
+  const m = /^\s*\{\{\s*body((?:\.[A-Za-z0-9_-]+)*)\s*\}\}\s*$/.exec(String(cfg.rows || '{{body}}'));
+  const path = m && m[1] ? m[1].slice(1).split('.') : [];
+  return path.reduceRight((inner, key) => ({ [key]: inner }), [row]);
 }
 
 router.delete('/:id', (req, res) => {

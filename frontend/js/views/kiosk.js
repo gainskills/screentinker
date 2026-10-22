@@ -1,6 +1,6 @@
 import { showToast } from '../components/toast.js';
 import { t } from '../i18n.js';
-import { esc } from '../utils.js';
+import { esc, canWrite, readOnlyNote } from '../utils.js';
 
 // A refused request must reject, not resolve.
 //
@@ -13,7 +13,7 @@ import { esc } from '../utils.js';
 // not. Same contract now, including the 401 session-expiry reload.
 const API = (url, opts = {}) => fetch('/api' + url, { headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${localStorage.getItem('token')}`, ...opts.headers }, ...opts }).then(async (r) => {
   if (r.status === 401) { localStorage.removeItem('token'); window.location.reload(); throw new Error('Session expired'); }
-  if (!r.ok) { const e = await r.json().catch(() => ({})); throw new Error(e.error || `Request failed (${r.status})`); }
+  if (!r.ok) { const e = await r.json().catch(() => ({})); throw Object.assign(new Error(e.error || `Request failed (${r.status})`), { status: r.status, body: e }); }
   return r.json();
 });
 
@@ -41,11 +41,12 @@ async function renderList(container) {
   container.innerHTML = `
     <div class="page-header">
       <div><h1>${t('kiosk.title')} <span class="help-tip" data-tip="${t('kiosk.help_tip')}">?</span></h1><div class="subtitle">${t('kiosk.subtitle')}</div></div>
-      <button class="btn btn-primary" id="newKioskBtn">
+      <button class="btn btn-primary" id="newKioskBtn" ${canWrite() ? '' : 'hidden'}>
         <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><line x1="12" y1="5" x2="12" y2="19"/><line x1="5" y1="12" x2="19" y2="12"/></svg>
         ${t('kiosk.new_page')}
       </button>
     </div>
+    ${readOnlyNote()}
     <div class="content-grid" id="kioskGrid"></div>
   `;
 
@@ -74,7 +75,7 @@ async function renderList(container) {
         </div>
         <div class="content-item-actions">
           <a href="/api/kiosk/${p.id}/render" target="_blank" class="btn btn-secondary btn-sm" style="text-decoration:none" onclick="event.stopPropagation()">${t('kiosk.preview')}</a>
-          <button class="btn btn-danger btn-sm" data-delete-kiosk="${esc(p.id)}" data-kiosk-name="${esc(p.name)}" onclick="event.stopPropagation()">${t('common.delete')}</button>
+          <button class="btn btn-danger btn-sm" ${canWrite() ? '' : 'hidden'} data-delete-kiosk="${esc(p.id)}" data-kiosk-name="${esc(p.name)}" onclick="event.stopPropagation()">${t('common.delete')}</button>
         </div>
       </div>
     `).join('');
@@ -89,7 +90,9 @@ async function renderList(container) {
           showToast(t('kiosk.toast.deleted'));
           renderList(container);
         } catch (err) {
-          showToast(err.message || t('kiosk.toast.delete_failed'), 'error');
+          // Refused while a playlist or schedule still shows it (routes/kiosk.js): name them.
+          const usedBy = err.body && err.body.code === 'KIOSK_PAGE_IN_USE' && Array.isArray(err.body.used_by) ? err.body.used_by : null;
+          showToast(usedBy ? t('kiosk.toast.delete_in_use', { names: usedBy.join(', ') }) : (err.message || t('kiosk.toast.delete_failed')), 'error');
         }
       };
     });
@@ -117,12 +120,16 @@ async function renderEditor(container, rawPageId) {
       <h1>${esc(page.name)}</h1>
       <div style="display:flex;gap:8px">
         <a href="/api/kiosk/${pageId}/render" target="_blank" class="btn btn-secondary" style="text-decoration:none">${t('kiosk.preview')}</a>
-        <button class="btn btn-primary" id="saveKioskBtn">${t('common.save')}</button>
+        <button class="btn btn-primary" id="saveKioskBtn" ${canWrite() ? '' : 'hidden'}>${t('common.save')}</button>
       </div>
     </div>
     <div style="display:flex;gap:20px">
-      <div style="flex:1">
-        <iframe id="kioskPreview" src="/api/kiosk/${pageId}/render" style="width:100%;aspect-ratio:16/9;border:1px solid var(--border);border-radius:var(--radius-lg)"></iframe>
+      <div style="flex:1;min-width:0">
+        <!-- Drawn at 1920x1080 and scaled down, so the preview lays out like the screen. At the box's own
+             size the page's fixed paddings and font sizes pushed the lower rows of buttons out of view. -->
+        <div id="kioskPreviewBox" style="position:relative;width:100%;aspect-ratio:16/9;overflow:hidden;border:1px solid var(--border);border-radius:var(--radius-lg)">
+          <iframe id="kioskPreview" src="/api/kiosk/${pageId}/render" style="position:absolute;top:0;left:0;width:1920px;height:1080px;border:0;transform-origin:0 0"></iframe>
+        </div>
       </div>
       <div style="width:320px;max-height:calc(100vh - 140px);overflow-y:auto;display:flex;flex-direction:column;gap:12px">
         <div style="background:var(--bg-card);border:1px solid var(--border);border-radius:var(--radius);padding:12px">
@@ -182,10 +189,19 @@ async function renderEditor(container, rawPageId) {
 
     list.querySelectorAll('[data-btn]').forEach(input => {
       input.oninput = () => {
-        const idx = parseInt(input.dataset.btn);
+        const b = config.buttons[parseInt(input.dataset.btn)];
         const field = input.dataset.field;
-        if (field === 'url' && config.buttons[idx].action === 'page') config.buttons[idx].page = input.value;
-        else config.buttons[idx][field] = input.tagName === 'SELECT' ? input.value : input.value;
+        // One address box, two stored fields: `page` for Go to page, `url` otherwise. The address used
+        // to land in whichever the action was AT TYPING TIME, so typing first and then choosing Go to
+        // page left `page` empty and the button did nothing. It now follows the action both ways.
+        if (field === 'url') { b[b.action === 'page' ? 'page' : 'url'] = input.value; return; }
+        if (field === 'action') {
+          const address = (b.action === 'page' ? b.page : b.url) || b.url || b.page || '';
+          b.action = input.value;
+          if (b.action === 'page') { b.page = address; delete b.url; } else { b.url = address; delete b.page; }
+          return;
+        }
+        b[field] = input.value;
       };
     });
     list.querySelectorAll('[data-remove-btn]').forEach(btn => {
@@ -205,6 +221,10 @@ async function renderEditor(container, rawPageId) {
     config.footer = document.getElementById('kFooter').value;
     config.idleTitle = document.getElementById('kIdleTitle').value;
     config.idleTimeout = parseInt(document.getElementById('kIdleTimeout').value) || 60;
+    // The screen's own words for an "Open URL" button's Back bar, in the editor's language
+    // (the render falls back to English for a page saved before these existed).
+    config.siteBackLabel = t('kiosk.site_back');
+    config.siteHint = t('kiosk.site_hint');
     config.style = {
       ...config.style,
       background: document.getElementById('kBg').value,
@@ -222,6 +242,22 @@ async function renderEditor(container, rawPageId) {
   };
 
   renderButtons();
+
+  const previewBox = document.getElementById('kioskPreviewBox');
+  const fitPreview = () => {
+    const frame = document.getElementById('kioskPreview');
+    if (frame && previewBox.clientWidth) frame.style.transform = `scale(${previewBox.clientWidth / 1920})`;
+  };
+  fitPreview();
+  if (previewObserver) previewObserver.disconnect();
+  if (typeof ResizeObserver === 'function') {
+    previewObserver = new ResizeObserver(fitPreview);
+    previewObserver.observe(previewBox);
+  }
 }
 
-export function cleanup() {}
+let previewObserver = null;
+
+export function cleanup() {
+  if (previewObserver) { previewObserver.disconnect(); previewObserver = null; }
+}

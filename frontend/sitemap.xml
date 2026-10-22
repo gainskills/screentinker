@@ -61,6 +61,12 @@
     <priority>0.8</priority>
   </url>
   <url>
+    <loc>https://screentinker.com/guides/</loc>
+    <lastmod>2026-10-08</lastmod>
+    <changefreq>monthly</changefreq>
+    <priority>0.7</priority>
+  </url>
+  <url>
     <loc>https://screentinker.com/integrations/</loc>
     <lastmod>2026-10-08</lastmod>
     <changefreq>monthly</changefreq>
@@ -303,6 +309,116 @@
   <url>
     <loc>https://screentinker.com/integrations/slack-teams-offline-alerts.html</loc>
     <lastmod>2026-10-08</lastmod>
+    <changefreq>monthly</changefreq>
+    <priority>0.7</priority>
+  </url>
+  <url>
+    <loc>https://screentinker.com/guides/digital-signage-scheduling.html</loc>
+    <changefreq>monthly</changefreq>
+    <priority>0.7</priority>
+  </url>
+  <url>
+    <loc>https://screentinker.com/guides/white-label-digital-signage.html</loc>
+    <changefreq>monthly</changefreq>
+    <priority>0.7</priority>
+  </url>
+  <url>
+    <loc>https://screentinker.com/guides/digital-signage-getting-started.html</loc>
+    <changefreq>monthly</changefreq>
+    <priority>0.7</priority>
+  </url>
+  <url>
+    <loc>https://screentinker.com/guides/digital-signage-content-playlists.html</loc>
+    <changefreq>monthly</changefreq>
+    <priority>0.7</priority>
+  </url>
+  <url>
+    <loc>https://screentinker.com/guides/digital-signage-users-roles.html</loc>
+    <changefreq>monthly</changefreq>
+    <priority>0.7</priority>
+  </url>
+  <url>
+    <loc>https://screentinker.com/guides/digital-signage-layouts-zones.html</loc>
+    <changefreq>monthly</changefreq>
+    <priority>0.7</priority>
+  </url>
+  <url>
+    <loc>https://screentinker.com/guides/digital-signage-troubleshooting.html</loc>
+    <changefreq>monthly</changefreq>
+    <priority>0.7</priority>
+  </url>
+  <url>
+    <loc>https://screentinker.com/guides/digital-signage-groups-video-walls.html</loc>
+    <changefreq>monthly</changefreq>
+    <priority>0.7</priority>
+  </url>
+  <url>
+    <loc>https://screentinker.com/guides/digital-signage-qr-codes.html</loc>
+    <changefreq>monthly</changefreq>
+    <priority>0.7</priority>
+  </url>
+  <url>
+    <loc>https://screentinker.com/guides/digital-signage-templates.html</loc>
+    <changefreq>monthly</changefreq>
+    <priority>0.7</priority>
+  </url>
+  <url>
+    <loc>https://screentinker.com/guides/digital-signage-slides.html</loc>
+    <changefreq>monthly</changefreq>
+    <priority>0.7</priority>
+  </url>
+  <url>
+    <loc>https://screentinker.com/guides/digital-signage-social-feeds.html</loc>
+    <changefreq>monthly</changefreq>
+    <priority>0.7</priority>
+  </url>
+  <url>
+    <loc>https://screentinker.com/guides/digital-signage-widgets.html</loc>
+    <changefreq>monthly</changefreq>
+    <priority>0.7</priority>
+  </url>
+  <url>
+    <loc>https://screentinker.com/guides/digital-signage-data-sources.html</loc>
+    <changefreq>monthly</changefreq>
+    <priority>0.7</priority>
+  </url>
+  <url>
+    <loc>https://screentinker.com/guides/digital-signage-interactive-kiosk.html</loc>
+    <changefreq>monthly</changefreq>
+    <priority>0.7</priority>
+  </url>
+  <url>
+    <loc>https://screentinker.com/guides/digital-signage-alerts.html</loc>
+    <changefreq>monthly</changefreq>
+    <priority>0.7</priority>
+  </url>
+  <url>
+    <loc>https://screentinker.com/guides/digital-signage-automation.html</loc>
+    <changefreq>monthly</changefreq>
+    <priority>0.7</priority>
+  </url>
+  <url>
+    <loc>https://screentinker.com/guides/digital-signage-content-requests.html</loc>
+    <changefreq>monthly</changefreq>
+    <priority>0.7</priority>
+  </url>
+  <url>
+    <loc>https://screentinker.com/guides/digital-signage-emergency-alerts.html</loc>
+    <changefreq>monthly</changefreq>
+    <priority>0.7</priority>
+  </url>
+  <url>
+    <loc>https://screentinker.com/guides/digital-signage-head-office.html</loc>
+    <changefreq>monthly</changefreq>
+    <priority>0.7</priority>
+  </url>
+  <url>
+    <loc>https://screentinker.com/guides/digital-signage-proof-of-play-reports.html</loc>
+    <changefreq>monthly</changefreq>
+    <priority>0.7</priority>
+  </url>
+  <url>
+    <loc>https://screentinker.com/guides/digital-signage-triggers.html</loc>
     <changefreq>monthly</changefreq>
     <priority>0.7</priority>
   </url>

@@ -277,7 +277,7 @@
 <body>
   <!-- Setup Screen -->
   <div id="setupScreen">
-    <h1>ScreenTinker</h1>
+    <h1 data-brand>ScreenTinker</h1>
     <div class="subtitle">Web Player</div>
     <div class="form" id="urlForm">
       <label>Server URL</label>
@@ -312,7 +312,7 @@
   <!-- Status Overlay -->
   <div id="statusOverlay" style="display:none">
     <div class="spinner"></div>
-    <h2>ScreenTinker</h2>
+    <h2 data-brand>ScreenTinker</h2>
     <p id="statusText" data-i18n="connecting">Connecting...</p>
   </div>
 
@@ -599,6 +599,49 @@
       return '::' + h(2166136261) + h(0x9747b28c);
     }
     const LINK_SUFFIX = VIEWER_MODE ? '' : linkStorageSuffix(urlEnrolKey());
+    /*
+     * #674: the brand this screen shows, as { name, hidden }. The server stamps the brand its hostname
+     * resolves to into the markup and into __playerConfig.brand; device:paired then carries the paired
+     * workspace's own brand, cached here so a reboot paints it before the socket is up. hidden = show
+     * no product name at all (the instance hides platform branding and never renamed itself).
+     */
+    const BRAND_KEY = 'st_brand' + LINK_SUFFIX;
+    function servedBrand() {
+      const b = window.__playerConfig && window.__playerConfig.brand;
+      return (b && typeof b.name === 'string') ? { name: b.name, hidden: !!b.hidden } : { name: 'ScreenTinker', hidden: false };
+    }
+    let playerBrand = (() => {
+      try {
+        const c = JSON.parse(localStorage.getItem(BRAND_KEY) || 'null');
+        if (c && typeof c.name === 'string') return { name: c.name, hidden: !!c.hidden };
+      } catch (e) {}
+      return servedBrand();
+    })();
+    // "<brand> Web Player" in the screen's language; just "Web Player" when the brand is hidden.
+    function brandTitle() {
+      if (playerBrand.hidden || !playerBrand.name) return _t('web_player');
+      return _t('info_title').replace('ScreenTinker', playerBrand.name);
+    }
+    // Paints the current brand everywhere it shows. Text only (textContent), never markup.
+    function applyBrand(b) {
+      if (b && typeof b.name === 'string') {
+        playerBrand = { name: b.name, hidden: !!b.hidden };
+        try { localStorage.setItem(BRAND_KEY, JSON.stringify(playerBrand)); } catch (e) {}
+      }
+      document.title = playerBrand.name ? playerBrand.name + ' Player' : 'Player';
+      document.querySelectorAll('[data-brand]').forEach((el) => {
+        el.textContent = playerBrand.name;
+        el.style.display = playerBrand.name ? '' : 'none';
+      });
+      document.querySelectorAll('[data-brand-title]').forEach((el) => { el.textContent = brandTitle(); });
+    }
+    // Unpaired: the workspace brand no longer applies; back to what this hostname serves.
+    function forgetBrand() {
+      try { localStorage.removeItem(BRAND_KEY); } catch (e) {}
+      playerBrand = servedBrand();
+      applyBrand();
+    }
+    applyBrand();
     const SCREEN_SUFFIX = VIEWER_MODE ? '__view' : (() => {
       try { return BS ? (BS.storageSuffix() || '') : ''; } catch (e) { return ''; }
     })() + LINK_SUFFIX;
@@ -1828,9 +1871,18 @@
     // data every WIDGET_SOLO_REFRESH_MS — decoupled from duration_sec, because a static
     // board re-querying the DB + re-rendering every few seconds, fleet-wide, is pure waste.
     /* How long a single-item playlist waits before retrying an item it cannot render. In a
-     * multi-item playlist an unknown type advances immediately; alone there is nothing to advance
-     * to, so it must not spin. */
+     * multi-item playlist an unknown type advances immediately when another item can play; alone
+     * (or among items that cannot play either) there is nothing to advance to, so it must not spin. */
     const UNKNOWN_ITEM_HOLD_MS = 15000;
+    // The types renderContent knows how to put on screen; anything else is skipped (see there).
+    function isRenderableItem(item) {
+      return !!(item && (
+        item.widget_id ||
+        item.mime_type === BUNDLE_MIME ||
+        item.mime_type === 'video/youtube' ||
+        (typeof item.mime_type === 'string' && (item.mime_type.startsWith('video/') || item.mime_type.startsWith('image/')))
+      ));
+    }
     /* The mime lib/html-bundle.js stamps on an uploaded HTML bundle. Deliberately matches no
      * image/ or video/ prefix, so nothing routes it as media by accident. */
     const BUNDLE_MIME = 'application/vnd.screentinker.bundle+zip';
@@ -2846,7 +2898,7 @@
         const tapOverlay = document.createElement('div');
         tapOverlay.style.cssText = 'position:fixed;top:0;right:0;bottom:0;left:0;background:#111827;z-index:2000;display:flex;flex-direction:column;align-items:center;justify-content:center;cursor:pointer';
         tapOverlay.innerHTML = `
-          <h1 style="color:#3b82f6;font-size:3.6rem;font-family:sans-serif;margin-bottom:1.2rem">ScreenTinker</h1>
+          <h1 data-brand style="color:#3b82f6;font-size:3.6rem;font-family:sans-serif;margin-bottom:1.2rem"></h1>
           <p style="color:#94a3b8;font-size:1.8rem;font-family:sans-serif">Tap anywhere to start</p>
           <p style="color:#64748b;font-size:1.3rem;font-family:sans-serif;margin-top:2.4rem">Audio requires user interaction</p>
         `;
@@ -2857,6 +2909,7 @@
           connect(config.serverUrl);
         };
         document.body.appendChild(tapOverlay);
+        applyBrand();   // #674: fills the heading above (text only)
 
         // Auto-dismiss after 5 seconds if no interaction (plays muted)
         setTimeout(() => {
@@ -3581,6 +3634,8 @@
          * feature being broken.
          */
         if (data && data.settings_pin) config.settingsPin = String(data.settings_pin);
+        // #674: the paired workspace's brand. Absent (older server, replica path) = keep what we show.
+        if (data && data.brand) applyBrand(data.brand);
         saveConfig(config);
         console.log('Paired as:', data.name);
         document.getElementById('setupScreen').style.display = 'none';
@@ -3597,7 +3652,8 @@
         const showIdle = (PMH && typeof PMH.shouldShowIdle === 'function')
           ? PMH.shouldShowIdle({ isPlaying: isPlaying, hasContent: playlist.length > 0 })
           : !isPlaying;
-        if (showIdle) showStatus('Waiting for content...');
+        // The device default image IS the idle screen when one is set; the card would cover it.
+        if (showIdle && !renderDefaultContent()) showStatus('Waiting for content...');
       });
 
       // Server no longer accepts our identity (row deleted, or token rejected). Drop the
@@ -3626,6 +3682,7 @@
 
       function enterRepairMode(message) {
         clearShareForUnpaired();
+        forgetBrand();   // #674
         delete config.deviceId;
         delete config.deviceToken;
         config.paired = false;
@@ -5282,6 +5339,33 @@
     // covers unconditionally, so a partial device_info does not "patch" a row — it nulls
     // android_version and the screen dimensions and resets ota_status/tier/the flag columns.
     // device:register and device:info both land there, so both must send the full thing.
+    // The surface this player draws on, in device pixels: what the wall editor sizes a fresh tile
+    // from (render_width/render_height, the same fields Android, the native player and Roku send).
+    // Without it every web-player panel -- browser, Tizen, webOS, BrightSign, Vega -- came out as the
+    // editor's 320x180 placeholder. A CSS quarter-turn lays the stage out sideways, so portrait
+    // swaps the two, as Android's rotated surface does. A host-rotated output (BrightSign) already
+    // turns the viewport itself, so there is nothing to swap.
+    function renderSize() {
+      const dpr = window.devicePixelRatio || 1;
+      let w = Math.round((window.innerWidth || 0) * dpr), h = Math.round((window.innerHeight || 0) * dpr);
+      if (cssQuarterTurn === 90 || cssQuarterTurn === 270) { const t = w; w = h; h = t; }
+      return w > 0 && h > 0 ? { w, h } : null;
+    }
+    let reportedRenderKey = '';
+    // Re-send device:info when the drawn size changes after registration (an orientation change,
+    // a resized browser window). Same full blob as register, per the warning below.
+    function maybeReportRenderSize() {
+      const r = renderSize();
+      const key = r ? r.w + 'x' + r.h : '';
+      if (!key || key === reportedRenderKey || !socket || !socket.connected || !config.deviceId) return;
+      socket.emit('device:info', { device_id: config.deviceId, device_info: buildDeviceInfo() });
+    }
+    let renderSizeTimer = null;
+    window.addEventListener('resize', () => {
+      clearTimeout(renderSizeTimer);
+      renderSizeTimer = setTimeout(maybeReportRenderSize, 2000);
+    });
+
     function buildDeviceInfo() {
       const info = {
         android_version: 'Web/' + navigator.userAgent.split(' ').pop(),
@@ -5295,6 +5379,8 @@
         screen_width: screen.width,
         screen_height: screen.height,
       };
+      const r = renderSize();
+      if (r) { info.render_width = r.w; info.render_height = r.h; reportedRenderKey = r.w + 'x' + r.h; }
       // Additive. applyDeviceInfo ignores unknown keys; applyHardwareIdentity reads these and
       // leaves a column alone when the key is absent, so a browser register does not wipe a
       // model that a previous Vega register stored... it can't, a browser has a different row.
@@ -5964,6 +6050,21 @@
       }
       // Check if device is suspended (trial expired / over limit)
       if (data.suspended) {
+        /*
+         * ⚠️ STOP what was playing, not just hide it. A reloaded screen starts its cached playlist
+         * before the server answers, so the suspension lands mid-item. Only emptying `playlist` left
+         * that item's advance timer (and any idle re-check) armed: it fired seconds later, found no
+         * items and painted "Nothing scheduled right now" over this card, so an over-limit screen
+         * never said why it was dark. Same for a campaign's step timer.
+         */
+        teardownCurrentMedia();
+        stopSlideVo();
+        stopSlideBed();
+        clearTimeout(scheduleRetryTimer);
+        clearLookahead();
+        deferredRotation = false;
+        if (deferredRotationDeadline) { clearTimeout(deferredRotationDeadline); deferredRotationDeadline = null; }
+        if (campaign) stopCampaign();
         isPlaying = false;
         playlist = [];
         document.getElementById('playerContainer').style.display = 'none';
@@ -6086,6 +6187,7 @@
               el.style.left = st.left;
             });
         }
+        maybeReportRenderSize();
       }
 
       // Apply (or clear) wall mode. Force re-render when wall config changes
@@ -6486,7 +6588,10 @@
       if (!dc || typeof dc.mime_type !== 'string' || !dc.mime_type.startsWith('image/')) return false;
       const container = document.getElementById('playerContainer');
       const key = dc.content_rev || dc.content_id || dc.remote_url || dc.filepath;
-      if (_defaultShownRev === key && container && container.querySelector('img[data-st-default]')) return true;
+      // ⚠️ #statusOverlay (z-index 500) sits ABOVE #playerContainer, so mounting the image is not
+      // enough: an idle card left up by an earlier path ("Waiting for content...", device:paired)
+      // covered it, and the default image was never seen. Every true return hides the card.
+      if (_defaultShownRev === key && container && container.querySelector('img[data-st-default]')) { hideStatus(); return true; }
       teardownCurrentMedia();
       const img = document.createElement('img');
       img.setAttribute('data-st-default', '1');
@@ -6495,6 +6600,7 @@
       img.src = mediaUrl(dc);
       if (container) { container.style.display = 'block'; container.appendChild(img); }
       _defaultShownRev = key;
+      hideStatus();
       return true;
     }
     // Every item filtered out: show the device default image (LED-wall off-times) or the idle screen,
@@ -7914,12 +8020,7 @@
 
       // Defense in depth: bail to waiting state on missing/malformed item rather
       // than fall through every branch and leave a blank container.
-      const hasRenderableType = item && (
-        item.widget_id ||
-        item.mime_type === BUNDLE_MIME ||
-        item.mime_type === 'video/youtube' ||
-        (typeof item.mime_type === 'string' && (item.mime_type.startsWith('video/') || item.mime_type.startsWith('image/')))
-      );
+      const hasRenderableType = isRenderableItem(item);
       if (!hasRenderableType) {
         /*
          * ⚠️ THIS USED TO RETURN WITHOUT ARMING ANYTHING, AND THAT STOPPED THE PLAYLIST DEAD.
@@ -7932,11 +8033,12 @@
          * body with no validation. An unknown type must be a SKIPPED ITEM, never a stopped playlist.
          *
          * A single-item playlist still holds (there is nothing to advance to), so it retries slowly
-         * rather than spinning.
+         * rather than spinning. So does a playlist where NO item is renderable: "advance at once"
+         * there was a 0 ms loop through the same dead items, a play_start each time, for ever.
          */
         showStatus('Waiting for content...');
         isPlaying = false;
-        const onlyItem = !playlist || playlist.length <= 1;
+        const onlyItem = !playlist || playlist.length <= 1 || !playlist.some((p) => p !== item && isRenderableItem(p));
         console.log('[player] skipping item with unrecognised type:', item && item.mime_type);
         scheduleAdvance(nextItem, onlyItem ? UNKNOWN_ITEM_HOLD_MS : 0);
         return;
@@ -9330,7 +9432,7 @@
           ctx.fillStyle = '#3b82f6';
           ctx.font = 'bold 28px sans-serif';
           ctx.textAlign = 'center';
-          ctx.fillText('ScreenTinker Web Player', W / 2, H / 2 - 40);
+          ctx.fillText(brandTitle(), W / 2, H / 2 - 40);
           ctx.fillStyle = '#94a3b8';
           ctx.font = '16px sans-serif';
           const item = playlist[currentIndex];
@@ -9639,12 +9741,13 @@
     infoDiv.id = 'infoOverlay';
     infoDiv.style.cssText = 'position:fixed;top:0;right:0;bottom:0;left:0;background:rgba(0,0,0,0.85);z-index:800;display:none;flex-direction:column;align-items:center;justify-content:center;color:#f1f5f9;font-family:-apple-system,sans-serif';
     infoDiv.innerHTML = `
-      <h2 style="color:#3b82f6;margin-bottom:16px">${_t('info_title')}</h2>
+      <h2 data-brand-title style="color:#3b82f6;margin-bottom:16px"></h2>
       <div style="font-size:14px;line-height:2;text-align:center;color:#94a3b8" id="infoContent"></div>
       <p style="margin-top:24px;font-size:12px;color:#64748b">${_t('info_close_hint')}</p>
     `;
     infoDiv.onclick = () => { infoDiv.style.display = 'none'; };
     document.body.appendChild(infoDiv);
+    applyBrand();
 
     // Escape user-controllable values before injecting into innerHTML — filenames,
     // device names, and server URLs are stored on the server and could contain HTML.

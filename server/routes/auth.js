@@ -932,7 +932,11 @@ router.get('/me', requireAuth, resolveTenancy, (req, res) => {
   }
 
   const currentOrg = req.organizationId
-    ? db.prepare('SELECT id, name, COALESCE(widget_sandbox_isolation_disabled, 0) AS widget_sandbox_isolation_disabled FROM organizations WHERE id = ?').get(req.organizationId)
+    // owner_plan_id: plans belong to the person who pays, the org owner. A workspace admin invited
+    // into an Enterprise organization has a plan of their own (often free), so a check on their
+    // plan alone hid Enterprise features such as white-label branding from them.
+    ? db.prepare(`SELECT o.id, o.name, COALESCE(o.widget_sandbox_isolation_disabled, 0) AS widget_sandbox_isolation_disabled, u.plan_id AS owner_plan_id
+        FROM organizations o LEFT JOIN users u ON u.id = o.owner_user_id WHERE o.id = ?`).get(req.organizationId)
     : null;
 
   res.json({
@@ -1403,6 +1407,10 @@ router.post('/accept-invite/:inviteId', requireAuth, (req, res) => {
         .run(ws.organization_id, req.user.id, orgRole, invite.invited_by);
     }
     db.prepare('DELETE FROM workspace_invites WHERE id = ?').run(invite.id);
+    // Joining someone's workspace is not a first run: the first-run guide walks you through pairing
+    // a first screen in a workspace of your OWN, which an invitee does not need (app.js
+    // maybeStartFirstRun). Same stamp as PUT /me { onboarded: true }; never cleared.
+    db.prepare("UPDATE users SET onboarded_at = COALESCE(onboarded_at, strftime('%s','now')) WHERE id = ?").run(req.user.id);
   });
   txn();
 

@@ -1,9 +1,191 @@
 # Changelog
 
-## 3.0.2
+## 3.0.3
 
 ### Added
 
+- **The dashboard in Danish (Dansk).** Pick it from the language menu. This is a first, machine-assisted
+  translation of every dashboard string and still needs a native speaker's review; corrections are
+  welcome. It also puts Danish in every list built from the dashboard's languages.
+
+### Fixed
+
+- **Testing a table hook works when its rows come from a field such as `{{body.items}}`.** The test sent an
+  empty list, so it failed with "No rows in the body" before the dry run could report anything. It now
+  sends one sample row, made from the table's own columns, where the hook reads its rows; still nothing
+  is written.
+- **Viewers no longer see buttons that only answer "Read-only access".** A workspace Viewer was
+  offered create, edit and delete buttons on Templates ("Use…"), QR codes, Data Sources (Connect
+  data, Sync Now, Edit, Delete), Kiosk, Widgets, Slides, Playlists, Layouts, Schedule, Triggers,
+  Video Walls, the Designer's Publish and the dashboard's Add, and the server refused every one.
+  Those pages now hide them and say the access is view-only. Alerts, Automation, Emergency feeds
+  and Site caches, which need a workspace admin, hide their changes from editors too. What the
+  server allows is unchanged.
+- **Danish (and every other weather language) can be chosen for a Weather data source** (#667, reported by
+  @djalfe). 3.0.2 shipped Danish weather words, but the form's language list was the dashboard's own,
+  which has no Danish. It now lists every language the weather supports, each in its own name, and the
+  label says **Weather language** instead of "Language for day names".
+- **Test on a table hook no longer changes the table.** The test sends an empty list of rows, so
+  testing a "Replace all rows" hook emptied the table without asking. A table hook's test is now a
+  dry run that says what it would do; real calls to the hook are unchanged.
+- **A "Switch screens back" hook now switches screens back.** It only released switches it had
+  started itself, and it never starts any, so it did nothing. It now ends every automation switch
+  on the screens in its scope, whichever hook or Zap started it, like the Zapier stop action.
+- **End now on the Automation page.** A hook with alerts on screens or screens switched (after a
+  test, say) shows **End now**, which ends them and leaves the hook on. Before, the only way was to
+  switch the hook off and on again.
+- **The Zapier note on the Automation page names the real settings.** It now says **Settings → API
+  Tokens** and the scopes **Read & write** and **Full (incl. device commands)**.
+- **A "Fire a trigger" hook reaches every player that can take it.** Browser, BrightSign, webOS,
+  Vega, iPad and Mac screens handle a trigger relayed by the server, but the hook only sent it to
+  Raspberry Pi and Windows screens and counted the rest as "LAN only". Android, Tizen and Roku
+  screens are still counted that way.
+- **The first Generate of a screen's trigger secret no longer asks "Rotate the shared secret?".**
+  The warning is for replacing a secret, and now only shows when there is one.
+- **"Open URL" kiosk buttons work on a screen.** They called `window.open()`, which a screen never
+  honours (the page runs in the player's sandboxed frames, and a TV has no second window), so the
+  button did nothing anywhere but Preview. The address now opens inside the kiosk page, full screen
+  under a **Back** bar, in a frame sandboxed like the page itself; http(s) addresses only. A site
+  that refuses to be shown inside another page stays blank, and the bar says so. The idle timeout
+  closes it and returns to the buttons.
+- **A kiosk page stays on screen until skipped.** Adding one sent duration 0, which the server
+  stores as the 10 s default (0 is only kept for live streams), and the playlist editor sent no
+  duration at all, so in a playlist with other items the page left after 10 s, even mid-use. New
+  kiosk items get 43200 s (12 h, the longest duration kept); lower it in Duration if you want it to
+  rotate. Items already in playlists keep their duration.
+- **Saving a kiosk page updates the screens already showing it.** The save notified nobody and a
+  screen keeps a widget it is showing mounted, so the change appeared only after a player restart.
+- **The kiosk editor's address box no longer depends on the order you fill it in.** Typing the
+  address before choosing **Go to page** stored it as an Open URL address, and the button did
+  nothing. The address now follows the action when it changes.
+- **Deleting a kiosk page no longer leaves a broken widget behind.** Its "Kiosk: …" widget stayed in
+  playlists and the screen showed "Page not found". A page still in a playlist or schedule is now
+  refused, naming where it is used; once nothing plays it, its widgets are deleted with it.
+- **The kiosk editor's preview shows every row of buttons.** It drew the page at the preview box's
+  own size, where the page's fixed paddings and text sizes pushed the lower rows out of view. It now
+  draws it at 1920x1080 and scales it down, as it looks on a screen.
+- **Menu Board's Logo, Background image and item Photo buttons work.** They opened the playlist's
+  Add Content dialog, so the Logo field read "[object Object]" at once and Add did nothing. They now
+  open the widget image picker (with upload), and the picked image is saved.
+- **Renaming a data source's slug no longer silently empties its tags.** Every `{{ds:old.…}}` tag
+  in slides and widgets, a menu board bound to the source and template widgets using it kept the
+  old name and rendered blank. Saving a new slug now lists what uses it and, on OK, rewrites those
+  tags to the new slug (live config and pending drafts). `GET /api/data-sources/:id/references` is
+  new; `PUT /api/data-sources/:id` takes `rewrite_tags: true` and returns `rewritten`.
+- **Data source slugs keep accented letters.** "Café menu" became `caf_menu`; it is now `cafe_menu`
+  (é → e, ß → ss, and so on), for the automatic slug and a typed one.
+- **A failed data source's status reads "Failed"**, not "Something went wrong."; the error itself
+  stays in the box under it and is the pill's tooltip.
+- **A long Source on a data source card (an .ics URL) is cut off with "…"** instead of overflowing
+  the card and pushing Last sync out of view.
+- **The Data Sources sidebar label is translated**, and the key-column hint shows the source's own
+  slug instead of always `{{ds:menu.…}}`.
+- **Social feed errors say what to do.** A Bluesky search reads "Bluesky only lets signed-in apps
+  search posts…" instead of "403"; an unknown Bluesky account reads "No Bluesky account by that
+  name." instead of "400: InvalidRequest"; an Instagram token that is expired or pasted wrong says
+  to paste a new token instead of "400: Failed to decode". **Add a source** says a feed can have at
+  most 10 sources instead of doing nothing.
+- **A template widget in the playlist editor shows the template's thumbnail** instead of the generic
+  widget icon.
+- **The slide editor's Insert Variable list offers the keys each data source really has.** It listed
+  the same six calendar keys for every source, so a tag picked for a Sheet, Weather or table source
+  showed nothing. It now lists the keys from the source's last sync (as the Data Sources page does),
+  and is no longer squeezed to "⚡ Ins▾" beside the text box.
+- **Choosing "Not tracked" for a slide's QR code works.** The code kept the tracked short address;
+  it now goes back to the link's own destination.
+- **The slide editor warns when a QR code holds a private address.** A tracked link picked while the
+  dashboard is open at localhost, a LAN address or a `.local` name scans to nothing on a visitor's
+  phone. The QR codes page's warning now also covers IPv6 (`::1`, `fd00::/8`, link-local) and
+  `.local` names; both pages use the same rule.
+- **The room-sign and waste-collection deck templates are in the dashboard's language** instead of
+  always German, and with no calendar connected they fill sample text rather than tags for made-up
+  data sources (`testraum`, `abfall`) that showed as empty.
+- **Renaming a slide deck renames its playlist** while the playlist still has the deck's old name. A
+  playlist renamed on the Playlists page keeps its own name.
+- **The toolbar's Add keeps the 40-element limit**, like paste. Elements past it showed in the editor
+  and were dropped on save.
+- **Undo works right after A.I. Generate**, even with nothing edited before it.
+- **More of the slide editor is translated**: the QR code panel, the Slide tab, + New deck, Edit,
+  Delete and ▶ Play entrance.
+- **Reports' Export CSV downloads the file.** It opened a new tab that only said "Authentication
+  required", because the link carried the sign-in token in the address, which the server does not
+  read. The file is now fetched with the session and saved, like the uptime CSV.
+- **Reports' Plays per Day labels each bar with its own day.** West of UTC every label was a day
+  early. The default date range is now today and the 30 days before it in your own time zone (in
+  the evening it could start a day late and end on tomorrow), and the range covers your whole days.
+- **Reports' "Screen uptime by client" section is translated**, and the numbers over the Plays per
+  Day bars are no longer printed on top of each other when they do not fit (hover a bar for its value).
+- **A content request form's place picker shows which groups have no playlist yet** and does not
+  let you pick them. Choosing one was only refused on Save.
+- **Request dates in the content request inbox are shown in your own date format** instead of
+  2026-10-21.
+- **An offline alert set to 1440 minutes (a day) is sent.** The form allows 2 to 1440 minutes, but
+  screens dark for more than a day were never looked at, so 1440 never fired and thresholds near it
+  barely did.
+- **The Alerts page's description mentions screen problems** (blank, frozen, wrong content, panel
+  off) as well as offline and back online.
+
+## 3.0.2
+
+### Upgrade notes
+
+- **Still on 2.x and your news ticker says "Feed unavailable"? Upgrade.** Before 3.0 the ticker read
+  every feed through a third-party converter (rss2json), which rate-limits and refuses some valid
+  feeds, so a ticker can work for a while and then stop. Since 3.0 your own server reads the feed;
+  existing ticker widgets switch over by themselves.
+- **Upgrading from 2.x: run the new upgrade script, and install `sqlite3` first.** The copy of
+  `scripts/upgrade.sh` that runs is the one from the release you are leaving. Before 3.0.2 it stops
+  silently right after "Backing up db" when the `sqlite3` tool is not installed, and the 2.x copy
+  does not know that 3.0 needs Node 22. So:
+  ```
+  sudo apt install sqlite3
+  git fetch --tags origin
+  git show v3.0.2:scripts/upgrade.sh > /tmp/upgrade.sh
+  APP_DIR=/path/to/screentinker bash /tmp/upgrade.sh
+  ```
+  The new script checks for local changes, `sqlite3` and Node before it changes anything, and
+  offers to install what is missing.
+- **RSS, cloud document and BI dashboard widgets with no saved colour were black and are now
+  transparent.** Full screen they look the same, over the screen's background colour (black unless one
+  is set). In a layout zone over other content, that content now shows through the widget. To keep a
+  widget black, untick **Transparent** and pick black. A widget whose colour was already saved,
+  including the #000000 the old picker saved, keeps that colour.
+
+### Added
+
+- **Eight user guides, each with a video** (screentinker.com/guides, #681, #690): getting started,
+  content & playlists, scheduling, layouts & zones, groups & video walls, users & roles, white-label,
+  and troubleshooting a screen. Written for whoever runs the screens, not for developers, with
+  callouts where a self-hosted server differs. Each page embeds its walkthrough video.
+- **Workspace admins can brand their own workspace** (#682). On an Enterprise plan, **Settings →
+  White Label / Branding** now shows for org owners and admins and the workspace's own admins, not only
+  the platform team, and the Enterprise check uses the organization owner's plan. Custom Domain and
+  Custom CSS stay platform-admin only.
+- **Several presenters at once on Android screens.** The Android player shows up to four screen
+  shares tiled, like the web player. It follows the room's spotlight (one presenter full screen,
+  the others kept connected) and plays only the chosen presenter's sound. The playlist comes back
+  when the last presenter leaves. It declares `remote.screen_share_tiles`, so the server now gives
+  Android screens more than one presenter when **several presenters** is on. Each share decodes
+  separately, so four at once needs a player with four hardware video decoders.
+- **A replica can connect out to its primary** (docs/scale-out.md, "A replica behind NAT"). Until
+  now the primary had to reach the replica, so a replica behind a router needed port forwarding or
+  a VPN. Now the primary mints an invite (**Servers → Create a replica invite**, with the
+  workspaces chosen there) and the replica joins with it (**Copy a server this one can reach**, or
+  `REPLICA_JOIN_CODE` at boot). The replica then keeps the connection open itself, and replication,
+  the media cache and screens on the replica work over it unchanged. It's off unless the primary
+  has `MESH_ALLOW_UPLINK` and the replica has `MESH_ACCEPT_ENROLLMENT`; the existing pairing is
+  unchanged. Additive column `mesh_edges.dial_token` and table `mesh_invites`. `/api/status`
+  `replica_of[]` gains `dial` (connected, last error) and `cache.videos`, and `scale_out.join`
+  while `REPLICA_JOIN_CODE` is still joining (it retries until the primary answers). Open invites
+  are listed under the button and can be cancelled; an invite stops working if the person who
+  created it loses the right to share those workspaces.
+- **Windows cache node** (server/packaging/windows). An installer that runs a replica as a Windows
+  service on a studio PC, so its screens keep playing when the internet drops. Node is bundled.
+  The installer asks for the main server's address, an invite, the shared secret, the cache size
+  and the port; the PC then joins by itself. A status page shows whether it's connected, the last
+  sync, cache use and the number of videos. Logs are kept in `C:\ProgramData\ScreenTinker\logs`.
+  It can also be installed silently with switches. The service runs as LocalService, and its
+  folders are open only to that account and to administrators. Built with NSIS (zlib licence).
 - **ONVIF cameras** (docs/onvif-cameras.md). **Add content → ONVIF camera**:
   - Find cameras on the network, or type an address. Sign in, pick a stream, and add it as a live
     stream every RTSP-capable screen already plays.
@@ -28,6 +210,9 @@
   `day0_precip_text`. The **Weather forecast** template 1.1.0 (needs server 3.0.2) and **Weather —
   animated** 1.1.0 use them; the animated one falls back to English on an older server.
 
+- **Portuguese (Brazil) and Spanish are fully translated.** The dashboard's pt-BR went from about
+  half translated to complete, with one vocabulary throughout (#661, by @lucianocosta), and Spanish
+  now covers every string (#668, by @neorai).
 - **A default zone for a playlist.** Under the playlist's **Layout**, pick the zone that **new** items
   go to when they're added without one (from the Manager app, the API, Make a sign, content requests,
   agency uploads, cloud folders...). It replaces the layout's main zone for that playlist's new items
@@ -72,6 +257,140 @@
 
 ### Fixed
 
+- **Video wall tiles for web players start at the panel's real size.** The web player (browsers,
+  Tizen, webOS, BrightSign, Vega) never reported the size it draws at, so the wall editor gave
+  every such panel a 320x180 placeholder tile. It now reports it, and again after an
+  orientation change or window resize. Walls already saved keep their tile sizes.
+- **A group's Sync line names the protocol the way the Sync menu does.** With **Sync: Auto** it
+  read "screentinker — mixed fleet", printing the internal id, and called three identical web
+  players a mixed fleet. It now says "Standard — not every screen is a BrightSign" (or the reason
+  that applies), in the dashboard's language. `GET/PUT /api/groups` add `sync_reason_code` and
+  `sync_reason_count`; `sync_reason` stays English.
+- **Clicking a screen on a new video wall selects the screen, not the player.** Create Video Wall
+  (and **Fit player to screens**) lays the player exactly over the screens, so every click on a
+  panel picked up the player. A press on the player now goes to the screen beneath it; drag the
+  player by its PLAYER label or a corner handle (or use Fine position).
+- **The video wall flow is translated.** Create Video Wall's prompts and toasts, the editor's
+  toolbar, Fine position, the mounting choices, the Panels list and the How it works card were
+  English in every language.
+- **The wall's bezel fields say what unit they are.** H/V Bezel are canvas pixels (the gap
+  Auto-arrange leaves between panels), as their label says, although the API fields are named
+  `bezel_h_mm` / `bezel_v_mm`. The hint under them and the API docs now say so; nothing is stored
+  differently.
+- **The group bar no longer squeezes at 1440 px wide.** With the Auto: badge and the Sync controls
+  showing, the group name broke over two lines and the badges stacked; the bar now wraps onto a
+  second line instead.
+- **The group Set Playlist toast counts only the screens that play it.** It said "Playlist assigned
+  to 2 devices" when one of them kept its own playlist. It now says how many play it and how many
+  keep another playlist (their own, a schedule's, a wall's or a higher-priority group's), and the
+  confirmation no longer says it goes to all devices. `POST /api/groups/:id/assign-playlist`
+  `devices_updated` is that count, with `devices_overridden` for the rest.
+- **`scripts/upgrade.sh` no longer stops silently on a host without the `sqlite3` tool.** The
+  server has SQLite built in, but the pre-upgrade backup uses the `sqlite3` shell; without it the
+  script ended right after "Backing up db" with no message. It now checks first, offers to install
+  the package (like it does Node), and otherwise says what to install, before changing anything.
+- **Videos on the guide pages play again.** The /guides/ pages get the dashboard's security policy,
+  which only allowed youtube.com frames, so the youtube-nocookie.com embed on the Samsung TV guide
+  was a blank box. Every user guide (getting started, playlists, scheduling, layouts & zones,
+  groups & walls, users & roles, white-label and troubleshooting) now embeds its video too.
+- **With approval required, the playlist editor no longer offers a Publish button that can only
+  fail.** The draft banner says to submit the playlist for review instead (the server already
+  refused a direct publish, for every role).
+- **The Reviews page is readable.** "Changes since the live version" and Preview name the files,
+  widgets and playlists instead of printing JSON and ids, and adding one item no longer marks every
+  other item as changed. The history window's "compare with live" gets the same fix.
+- **Members (Advanced view) no longer says "Invite sent" when no email went out.** On a server
+  without email it shows the invite link with a Copy button, as Simple view's Your team page does.
+- **The sidebar shows your role in the current workspace** (Admin, Editor, Viewer) instead of the
+  account-wide "user" that nearly everyone has. Platform staff still see their platform role.
+- **Platform → Branding keeps an empty Brand name empty.** It was saved as "ScreenTinker", so the
+  field read "ScreenTinker" after a reload. Screens behave as before: with Hide platform branding
+  and no name they show no product name.
+- **Simple view's role descriptions match what each role can do:** Editors can add screens too;
+  what Admins add is inviting people and changing workspace settings.
+- **A screen's Playlist tab names zones like the playlist editor.** Items without a zone said
+  "No zone" there but "Main zone (Main)" in the editor, and an item's zone showed as the start of
+  its id ("Zone: b8daf522"). Both now show the zone's name. `GET /api/devices/:id`
+  `active_layout_zones[]` gains `is_main`, `width_percent` and `height_percent`.
+- **The playlist editor shows item names on a 1280 px laptop.** The row's controls (Duration,
+  From/To and the rest) took the whole width and the name disappeared; they now wrap onto a second
+  line instead.
+- **The schedule calendar uses a schedule's Color.** Blocks were always filled with the screen's or
+  group's calendar colour and the chosen Color was only a thin left edge, so it looked as if it
+  hadn't saved. A Color other than the default now fills the block (the edge keeps the screen's
+  colour); a schedule left on the default looks as before. A long schedule name in a narrow block
+  (two schedules side by side in Week view) now wraps instead of ending at "Past…".
+- **"It's live!" no longer promises the screen changes in a few seconds.** Screens get the change
+  that fast, but a screen keeps playing what's on and shows a new item when its turn comes in the
+  loop (about 25 s in one test). The text now says so.
+- **"Pairing code expired" now says what helps.** It told people to "restart the display to get a
+  new code", which cannot work: a restarted player shows the same code. It now says the screen has
+  not been online for over 15 minutes and to get it back online, then type the code again.
+- **Create Account asks for 8 characters, like the server** (#691, reported by @samuelson-ben in
+  #696). The form said "At least 6 characters"
+  and let a 6- or 7-character password through, which the server then refused. In every language.
+- **The setup guide's "No device found with that pairing code" goes away when you edit the code**,
+  instead of staying under the box while the corrected code is typed.
+- **Add screen shows one pairing error at a time.** After a too-short code, "Enter a valid 6-digit
+  pairing code" was still on screen when the next attempt's error arrived, and the two stacked.
+- **A screen's Default Content now shows on the web player** (Device Info → Settings → Default
+  Content). The picture was put on the page but the "Waiting for content..." card stayed on top
+  of it, so it was never seen. **Save Settings** also now sends the change to a screen that is
+  already on, instead of it waiting for the screen to reconnect; that goes for orientation and
+  background colour too.
+- **A web player over the plan's screen limit says so.** After a reload it showed "Nothing
+  scheduled right now" instead of "Device Limit Reached" (or "Trial Expired"): the suspension
+  arrived while the cached playlist was already playing, and that item's timer later replaced the
+  card. The suspension now stops what was playing first.
+- **Uptime Timeline agrees with Recent incidents.** A screen that dropped and came back within the
+  same 15 minutes was drawn all green at "100% uptime", right above an incident saying it was down
+  for 4 minutes. Any downtime now marks its slot red, and the percentage is worked out by time.
+- **A web player whose playlist has nothing it can play no longer spins.** A playlist made only of
+  items of a type the player does not know showed "Waiting for content..." but skipped through
+  them in a tight loop; it now retries every 15 seconds, like a single such item already did.
+- **Device clock shows "--" until a screen reports its time zone**, instead of "UTC", which was
+  only the setting's default.
+- **Creating an account from an invite link lands in the invited workspace.** Someone who opened
+  the link signed out and then signed up (or signed in) was added to the workspace, but the page
+  reloaded mid-switch: they started in their own workspace instead, and a new account on a hosted
+  server got its empty "Default" workspace and the setup guide. Accepting an invite now also marks
+  the first-run guide done for that account, since they're joining a workspace someone else set up.
+- **The playlist editor no longer looks as if Publish lost your work.** After **Publish** (or
+  **Discard changes**) the editor redrew from a shorter answer than a page load gets, so until a
+  reload the Layout row said "Each screen's own layout", the Default zone row and every Zone picker
+  were gone, and items lost their schedule chip and clock icon. Screens and the saved playlist were
+  always fine. Publish and discard now answer with exactly what `GET /api/playlists/:id` returns.
+- **A white-labelled workspace is no longer told to install an app under its own brand.** The
+  Settings Setup Guide said "Install the <Brand> APK" and the empty Screens page "Open the <Brand>
+  player on a TV", but the installed apps (Android/Fire TV, Tizen, webOS, Roku, iOS, the native Pi
+  and Windows players) are always called ScreenTinker; only the web player and what the server
+  serves are white-labelled. Those texts, the device-owner note and the remote-shell greetings now
+  say ScreenTinker in every language; the web player is still named after the brand. Saving the
+  branding also updates the brand shown under Settings → About without a reload.
+- **A whole-server export can no longer fill the disk** (Platform → Data & privacy). One did on our
+  own server: it needed about twice the export's size, never checked free space, and when the disk
+  filled it hung with its files left behind. Every 15 minutes a sweep also put the hung export back in
+  the queue, so the next restart would have started it again. Now:
+  - It's refused up front (HTTP 507, with the sizes) when it won't fit and still leave 5% of the
+    disk, or at least 1 GB, free. Free space is checked again before each organization.
+  - Each organization's zip is deleted as soon as it has been copied into the bundle, so the export
+    needs about its own size plus the largest organization, not twice its size.
+  - A write error (a full disk) ends the export as failed, and its files are removed. This applies to
+    organization and personal exports too.
+  - An export a restart interrupted is marked failed, never queued again, and its leftover files are
+    removed when the server starts.
+- **`/guides/` has a page** listing every guide by device, plus self-hosting and building content.
+  It was a 404 (and `/guides` redirected into it), and every guide's "Guides" breadcrumb went to the
+  home page instead. A guide, integration or solution address typed without `.html` now redirects to
+  the page rather than answering 404. The hub is in the sitemap and `llms.txt`.
+- **The web player uses the instance's branding** (#674, reported by @freefos). On a white-labelled instance, `/player`
+  still said "ScreenTinker" on the tap-to-start screen, the status and setup screens, the info
+  overlay and the tab title. It now shows the brand name instead: the one for the hostname before a
+  screen is paired, then the brand of the workspace it's paired to (`device:paired` carries it, and
+  the player remembers it across reboots). With **Hide platform branding** on and no brand name of
+  its own, a screen shows no product name at all. This covers every screen that opens the `/player`
+  address (a browser, a kiosk, a panel's URL launcher). The installed apps (Android, Fire TV, Tizen, webOS, Roku, the
+  native players) are unchanged: their names and icons are part of the published build.
 - **A camera in a layout zone reconnects by itself (Android).** A zone with one item had no error
   handling at all, and no zone had a stall watchdog. A camera whose connection dropped (the NVR
   restarted, the Wi-Fi roamed, the camera rebooted) froze on its last frame until the app was
@@ -127,6 +446,10 @@
 - A stream added without a name was named from the end of its URL, which for `rtsp://user:pass@host`
   was the user name and password. It is now named from the path or the host, and never after a share
   token.
+- **Simple view: "Replace what it shows now" added instead of replacing on a screen whose group has
+  a playlist.** The screen made its own copy of the group's playlist and the new photo was added to
+  the end, so it played the group's items too. Now only the chosen photos and videos play on that
+  screen. The group's playlist and the other screens in the group don't change.
 
 ### Security
 
@@ -141,14 +464,23 @@
   looks like one (16+ letters and digits, mixed case) is shown as `********` and kept on edit, by the
   same rules as a password.
 - The Android and native players no longer write a camera's password or share token to their logs.
+- **The native Windows and macOS players use aiohttp 3.14.4** (#676), which fixes GHSA-2g87-pp6c-29x5
+  and GHSA-5wr8-gcqf-gqf3 (high: unbounded memory/CPU use, no first-request timeout) and
+  GHSA-494j-54xm-rwp3 (low). The server, Docker image, and Android, web, Tizen and Roku players are not
+  affected; the Pi `.deb` uses Debian's own aiohttp.
 
-### Upgrade notes
+### Contributors
 
-- **RSS, cloud document and BI dashboard widgets with no saved colour were black and are now
-  transparent.** Full screen they look the same, over the screen's background colour (black unless one
-  is set). In a layout zone over other content, that content now shows through the widget. To keep a
-  widget black, untick **Transparent** and pick black. A widget whose colour was already saved,
-  including the #000000 the old picker saved, keeps that colour.
+- @lucianocosta: the complete Portuguese (Brazil) translation, 1 of the 32 commits in this release (#661).
+- @neorai: the complete Spanish translation, 1 of the 32 commits in this release (#668).
+- @freefos reported the web player ignoring white-label branding (#674); @djalfe reported empty and
+  see-through zones (#666, #660) and asked for weather in their language (#667); @samuelson-ben
+  reported the 6-vs-8 character password (#696).
+
+### Sponsors
+
+Thank you to @Semetra22 and @hapishyguy for sponsoring ScreenTinker on GitHub Sponsors, and to everyone
+who sponsors privately.
 
 ## 3.0.1
 

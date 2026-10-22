@@ -158,7 +158,8 @@ const DASHBOARD_CSP = {
     // 'wss:'/'ws:' keep the dashboard's socket.io connection working; the CF entry lets the beacon report.
     connectSrc: ["'self'", 'wss:', 'ws:', 'https:', 'https://cloudflareinsights.com'],
     fontSrc: ["'self'", 'data:'],
-    frameSrc: ["'self'", 'https://www.youtube.com', 'https://youtube.com'],
+    // youtube-nocookie.com: the video embeds on the /guides/ pages (they get this policy too).
+    frameSrc: ["'self'", 'https://www.youtube.com', 'https://youtube.com', 'https://www.youtube-nocookie.com'],
     objectSrc: ["'none'"],
     baseUri: ["'self'"],
     formAction: ["'self'"],
@@ -708,6 +709,11 @@ app.get(['/integrations', '/integrations/'], (req, res) => {
   if (req.path === '/integrations') return res.redirect(301, '/integrations/');
   res.sendFile(path.join(config.frontendDir, 'integrations', 'index.html'));
 });
+// The guides hub: same shape. Without it /guides/ was a 404 and /guides redirected into it.
+app.get(['/guides', '/guides/'], (req, res) => {
+  if (req.path === '/guides') return res.redirect(301, '/guides/');
+  res.sendFile(path.join(config.frontendDir, 'guides', 'index.html'));
+});
 // The solutions hub (use cases: emergency alerts, meeting rooms, menu boards...) is served the same
 // way, for the same reason: static runs with index:false.
 app.get(['/solutions', '/solutions/'], (req, res) => {
@@ -748,6 +754,9 @@ const VIEWER_STORAGE_SHIM = ' (function(){try{var m={};var s={getItem:function(k
   + 'setItem:function(k,v){m[k]=String(v);},removeItem:function(k){delete m[k];},clear:function(){m={};},'
   + 'key:function(i){return Object.keys(m)[i]||null;}};Object.defineProperty(s,"length",{get:function(){return Object.keys(m).length;}});'
   + 'Object.defineProperty(window,"localStorage",{value:s,configurable:true});Object.defineProperty(window,"sessionStorage",{value:s,configurable:true});}catch(e){}})();';
+function escapeHtmlText(s) {
+  return String(s).replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;');
+}
 function sendPlayer(res, file, opts) {
   const playerHtmlPath = path.join(__dirname, 'player', file);
   fs.readFile(playerHtmlPath, 'utf8', (err, html) => {
@@ -755,9 +764,18 @@ function sendPlayer(res, file, opts) {
     // View-only viewers (routes/view.js) never report: there is no device to attribute it to.
     const viewer = opts && opts.viewer;
     const reportingEnabled = !viewer && String(process.env.PLAYER_DEBUG_REPORTING || 'on').toLowerCase() !== 'off';
+    // #674: the brand this hostname resolves to (custom domain, then the platform default). A screen
+    // that is not paired yet has no workspace, so this is what the setup screen shows; once paired,
+    // device:paired carries the workspace's own brand and the page switches to it.
+    let brand = { name: 'ScreenTinker', hidden: false };
+    try {
+      const { resolveBranding, playerBrand } = require('./lib/branding');
+      brand = playerBrand(resolveBranding(require('./db/database').db, { domain: ((res.req && res.req.hostname) || '').toString() }));
+    } catch (e) { /* branding is best-effort; the player matters more */ }
     const inject =
       '  <script>window.__playerConfig = window.__playerConfig || {}; ' +
       'window.__playerConfig.debugReporting = ' + JSON.stringify(reportingEnabled) + ';' +
+      ' window.__playerConfig.brand = ' + JSON.stringify(brand).replace(/</g, '\\u003c') + ';' +
       // `<` escaped so nothing in the object can close the script element.
       (viewer ? ' window.__playerConfig.viewer = ' + JSON.stringify(viewer).replace(/</g, '\\u003c') + ';' + VIEWER_STORAGE_SHIM : '') +
       '</script>\n';
@@ -784,6 +802,13 @@ function sendPlayer(res, file, opts) {
       console.warn('[player] ST_PLAYER_VERSION marker not found — page will report a stale client_version');
     }
     modified = stamped;
+    // #674: brand the markup itself, so the first paint is already right (the script re-applies it
+    // when a paired screen's workspace brand differs). Hidden = the heading is left empty.
+    const brandHtml = escapeHtmlText(brand.name);
+    modified = modified
+      .replace('<title>ScreenTinker Player</title>', '<title>' + (brand.name ? brandHtml + ' Player' : 'Player') + '</title>')
+      .replace('<h1 data-brand>ScreenTinker</h1>', '<h1 data-brand>' + brandHtml + '</h1>')
+      .replace('<h2 data-brand>ScreenTinker</h2>', '<h2 data-brand>' + brandHtml + '</h2>');
     // A viewer page carries its access token in the URL: never stored by a cache on the way.
     res.type('html').setHeader('Cache-Control', viewer ? 'no-store' : 'no-cache');
     res.send(modified);
@@ -1394,6 +1419,9 @@ function rateLimit(windowMs, maxRequests, onReject) {
 // Auth routes (public, rate limited)
 app.use('/api/auth/login', rateLimit(60000, 10)); // 10 attempts per minute
 app.use('/api/auth/register', rateLimit(60000, 5)); // 5 registrations per minute
+// Scale-out dial-out (lib/mesh/dial-out.js): the two unauthenticated invite routes. The invite is a
+// 50-bit single-use code, so this is hygiene rather than the defence; only mounted with MESH_ALLOW_UPLINK.
+if (config.meshAllowUplink) app.use('/api/mesh/invite', rateLimit(60000, 20));
 // Support-token redemption (lib/support-access) is unauthenticated by nature: the token IS the
 // credential. Guessing one means forging an Ed25519 signature, so this limiter is about noise,
 // not brute force — but it is the one auth surface a stranger can hit without an account, so it
@@ -3193,7 +3221,7 @@ app.post('/api/provision/pair', requireAuth, resolveTenancy, checkDeviceLimit, (
   // (5 failures per IP per 15 min) plus the 5/min route limit, not by this TTL.
   const lastSeen = device.last_heartbeat || device.created_at;
   if (pairLockout.isCodeExpired(lastSeen)) {
-    return res.status(410).json({ error: 'Pairing code expired - restart the display to get a new code' });
+    return res.status(410).json({ error: pairLockout.CODE_EXPIRED_MESSAGE });
   }
   pairLockout.reset(ip); // a valid claim forgives prior failed attempts from this IP
 
@@ -3240,7 +3268,8 @@ app.post('/api/provision/pair', requireAuth, resolveTenancy, checkDeviceLimit, (
   require('./lib/device-group-rules').reconcileDeviceAsSystem(db, null, device.id);
 
   // Notify the device via WebSocket — or, scale-out C2, through the replica it is attached to.
-  const pairedMsg = { device_id: device.id, name: pairedName, settings_pin: settingsPin };
+  const pairedMsg = { device_id: device.id, name: pairedName, settings_pin: settingsPin,
+    brand: require('./lib/branding').playerBrandForDevice(require('./db/database').db, device.id) };   // #674
   const pairedRoom = deviceNs.adapter.rooms.get(device.id);
   if (pairedRoom && pairedRoom.size > 0) {
     deviceNs.to(device.id).emit('device:paired', pairedMsg);
@@ -3493,6 +3522,18 @@ app.get(['/tizen', '/tizen/'], (req, res) => {
  */
 const CONTENT_PREFIXES = ['/guides/', '/integrations/', '/solutions/'];
 
+// "/guides/roku-digital-signage" -> "/guides/roku-digital-signage.html", for every page under those
+// prefixes. Built once from the directory listings, so a request path is only ever a map key.
+const EXTENSIONLESS_PAGES = new Map();
+for (const prefix of CONTENT_PREFIXES) {
+  try {
+    for (const f of fs.readdirSync(path.join(config.frontendDir, prefix))) {
+      const m = /^([a-z0-9-]+)\.html$/.exec(f);
+      if (m && m[1] !== 'index') EXTENSIONLESS_PAGES.set(prefix + m[1], prefix + f);
+    }
+  } catch (e) { /* a missing folder has no pages */ }
+}
+
 /*
  * ⚠️ A MISSING ASSET IS A 404, NEVER THE APP SHELL. Every app route is `/#/…`, so a path ending in a
  * file extension that reached the catch-all names a file we do not have. Answering it with
@@ -3516,7 +3557,7 @@ const NOT_FOUND_PAGE = '<!DOCTYPE html><html lang="en"><head><meta charset="utf-
   + 'a:hover{text-decoration:underline}</style></head><body><div>'
   + '<h1>Page not found</h1>'
   + '<p>That page does not exist. Try the <a href="/">home page</a>, or the '
-  + '<a href="/guides/what-is-digital-signage.html">guides</a>.</p>'
+  + '<a href="/guides/">guides</a>.</p>'
   + '</div></body></html>';
 
 // SPA fallback for app routes. Unmatched /api/ paths return 404 so misrouted
@@ -3561,6 +3602,11 @@ app.get('/{*splat}', (req, res) => {
     return res.status(404).json({ error: 'Not found' });
   }
   if (CONTENT_PREFIXES.some((prefix) => req.path.startsWith(prefix))) {
+    // A page typed or linked without its .html (/guides/roku-digital-signage) is the page, not a miss.
+    // Only a plain lower-case slug is tried, so nothing outside these folders can be reached this way.
+    // Matched against the pages listed at boot, never by touching the disk with the request path.
+    const page = EXTENSIONLESS_PAGES.get(req.path);
+    if (page) return res.redirect(301, page);
     return res.status(404).type('html').send(NOT_FOUND_PAGE);
   }
   if (ASSET_EXTENSION.test(req.path)) {
