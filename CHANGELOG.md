@@ -2,6 +2,23 @@
 
 ## 3.0.3
 
+### Security: upgrade Node.js
+
+- **The Docker image runs Node.js 22.23.4** (#716), the [October 2026 Node.js security
+  release](https://nodejs.org/en/blog/vulnerability/october-2026-security-releases). Node 22.23.3
+  and earlier are exposed to CVE-2026-111497, an out-of-bounds write in the Brotli decoder that
+  allows remote code execution. ScreenTinker reaches it without signing in: the server accepts
+  Brotli-compressed request bodies, and it also decodes Brotli responses from feeds and other URLs
+  it fetches. The release also fixes TLS hostname checks that could be bypassed (CVE-2026-106069,
+  CVE-2026-106072) and updates OpenSSL, undici and c-ares.
+- **Native installs (Debian, Ubuntu, Raspberry Pi OS) need a Node upgrade, not just this release:**
+  run `sudo apt-get update && sudo apt-get install --only-upgrade nodejs`, check `node -v` is
+  22.23.4 or newer, then restart ScreenTinker. Upgrading ScreenTinker does not change the Node it
+  runs on. Docker installs get the fix by pulling 3.0.3.
+- **The Windows cache node installer bundles Node.js 22.23.4.**
+- The server still starts on Node 22.14.0 or newer; the minimum was not raised, so a host that has
+  not upgraded Node keeps running.
+
 ### Added
 
 - **The dashboard in Danish (Dansk).** Pick it from the language menu. This is a first, machine-assisted
