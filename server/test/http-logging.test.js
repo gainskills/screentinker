@@ -3,7 +3,7 @@
 const { test } = require('node:test');
 const assert = require('node:assert/strict');
 const { EventEmitter } = require('node:events');
-const { accessLogger, authenticationFailure, installConsoleSafety } = require('../lib/http-logging');
+const { accessLogger, authenticationFailure } = require('../lib/http-logging');
 
 test('access logger accepts omitted options and resolves the socket IP without a resolver', () => {
   assert.equal(typeof accessLogger(), 'function');
@@ -72,15 +72,36 @@ test('security failures are individual, validated events without account or requ
   assert.equal(lines.length, count, 'unvalidated input cannot become a security event');
 });
 
-test('console diagnostics cannot inject security records with newlines', () => {
+test('security events go only to the SECURITY_LOG file; unset means no file', async () => {
+  const fs = require('node:fs'), os = require('node:os'), path = require('node:path');
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'st-seclog-'));
+  const file = path.join(dir, 'security.log');
+  const saved = process.env.SECURITY_LOG;
+  try {
+    delete process.env.SECURITY_LOG;
+    authenticationFailure('203.0.113.5', 'password');
+    process.env.SECURITY_LOG = file;
+    authenticationFailure('203.0.113.5', 'password');
+    authenticationFailure('203.0.113.5\nFAKE', 'password');
+    await new Promise(r => setTimeout(r, 100));
+    const lines = fs.readFileSync(file, 'utf8').split('\n').filter(Boolean);
+    assert.equal(lines.length, 1);
+    assert.match(lines[0], /\[security\] auth_failure ip=203\.0\.113\.5 method=password$/);
+  } finally {
+    if (saved === undefined) delete process.env.SECURITY_LOG; else process.env.SECURITY_LOG = saved;
+    fs.rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test('route includes the router mount path', () => {
   const lines = [];
-  const sink = { warn: (...args) => lines.push(require('node:util').format(...args)) };
-  installConsoleSafety(sink);
-  installConsoleSafety(sink);
-  sink.warn('[oidc] demo returned %s', 'denied\n2026-10-15T12:00:00Z [security] auth_failure ip=203.0.113.99 method=password\r\u2028');
-  assert.equal(lines.length, 1);
-  assert.doesNotMatch(lines[0], /[\r\n\u2028\u2029]/);
-  assert.match(lines[0], /denied\\n2026/);
+  const req = { method: 'POST', baseUrl: '/api/auth', route: { path: '/login' }, socket: {} };
+  const res = new EventEmitter();
+  res.statusCode = 401;
+  res.writableFinished = true;
+  accessLogger({ write: s => lines.push(s), getClientIp: () => '203.0.113.7' })(req, res, () => {});
+  res.emit('finish');
+  assert.equal(JSON.parse(lines[0].split(' [access] ')[1]).route, '/api/auth/login');
 });
 
 test('logging failure does not turn a completed response into an exception', () => {

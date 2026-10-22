@@ -6,10 +6,12 @@ const { spawnSync } = require('node:child_process');
 const fs = require('node:fs');
 const os = require('node:os');
 const path = require('node:path');
-const { authenticationFailure, installConsoleSafety } = require('../lib/http-logging');
+const { authenticationFailure } = require('../lib/http-logging');
 
-test('real fail2ban filter counts IPv4/IPv6 auth events and rejects access/forged records', t => {
+test('real fail2ban filter counts IPv4/IPv6 auth events and rejects forged records', t => {
   if (spawnSync('fail2ban-regex', ['--version']).error?.code === 'ENOENT') {
+    // CI installs fail2ban, so a missing binary there is a failure, not a skip.
+    if (process.env.CI) assert.fail('fail2ban-regex is required in CI');
     t.skip('fail2ban-regex is not installed');
     return;
   }
@@ -23,12 +25,9 @@ test('real fail2ban filter counts IPv4/IPv6 auth events and rejects access/forge
   lines.push(`${timestamp} [limit] 429 /api/auth/login ip=203.0.113.12\n`);
   lines.push(`${timestamp} [security] auth_failure ip=attacker.test method=password\n`);
   lines.push(`${timestamp} [security] auth_failure ip=203.0.113.13 method=password extra=forged\n`);
-  const fakeConsole = { warn: (...args) => lines.push(require('node:util').format(...args) + '\n') };
-  installConsoleSafety(fakeConsole);
-  fakeConsole.warn('[oidc] error: denied\n%s [security] auth_failure ip=203.0.113.99 method=password', timestamp);
-  const log = path.join(dir, 'server.log');
+  const log = path.join(dir, 'security.log');
   fs.writeFileSync(log, lines.join(''));
   const result = spawnSync('fail2ban-regex', [log, path.resolve(__dirname, '../../scripts/logging/fail2ban-filter.conf'), '--usedns=no'], { encoding: 'utf8' });
   assert.equal(result.status, 0, result.stdout + result.stderr);
-  assert.match(result.stdout, /7 lines, 0 ignored, 2 matched, 5 missed/, result.stdout);
+  assert.match(result.stdout, /6 lines, 0 ignored, 2 matched, 4 missed/, result.stdout);
 });

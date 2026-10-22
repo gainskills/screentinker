@@ -1,10 +1,18 @@
 'use strict';
 
-// The service manager owns files/rotation. The application only writes to its console.
+// Access records go to the console (journald / docker logs keep working unchanged).
+// Security events go ONLY to the file named by SECURITY_LOG, and only
+// authenticationFailure() writes there, from validated fields. No console or other
+// untrusted text can reach that file, so nothing needs escaping globally.
+const fs = require('node:fs');
 const net = require('node:net');
-const { format } = require('node:util');
-const SAFE_CONSOLE = Symbol.for('screentinker.safe-console');
 const writeStdout = line => process.stdout.write(line);
+// Unset SECURITY_LOG = no security file (fail2ban is opt-in). Appends reopen the path each
+// time, so logrotate's rename/create rotation works without copytruncate.
+const writeSecurityLog = line => {
+  const file = process.env.SECURITY_LOG;
+  if (file) fs.appendFile(file, line, { mode: 0o640 }, () => { /* best effort */ });
+};
 const AUTH_METHOD = Object.freeze({ PASSWORD: 'password', TOTP: 'totp' });
 
 function clientAddress(value) {
@@ -14,34 +22,7 @@ function clientAddress(value) {
   return net.isIP(ip) && /^[\da-f:.]+$/i.test(ip) ? ip : null;
 }
 
-function escapeControls(text) {
-  return text.replace(/[\x00-\x1f\x7f-\x9f\u2028\u2029]/g, ch => {
-    if (ch === '\n') return '\\n';
-    if (ch === '\r') return '\\r';
-    if (ch === '\t') return '\\t';
-    return '\\u' + ch.charCodeAt(0).toString(16).padStart(4, '0');
-  });
-}
-
-// Console diagnostics share the service log with security records. Escape the WHOLE
-// formatted call, not just selected request fields: otherwise any newline in an IdP
-// error, plugin message or stack could impersonate a fail2ban event on a fresh line.
-function installConsoleSafety(target = console) {
-  if (target[SAFE_CONSOLE]) return;
-  Object.defineProperty(target, SAFE_CONSOLE, { value: true });
-  const stdout = target.log || target.info;
-  const stderr = target.error || target.warn;
-  for (const method of ['log', 'info', 'warn', 'error', 'debug', 'trace', 'dir', 'table']) {
-    if (typeof target[method] !== 'function') continue;
-    const output = (method === 'warn' || method === 'error' || method === 'trace')
-      ? stderr : (stdout || target[method]);
-    // Snapshot the output function before replacing any of the methods.
-    const original = output.bind(target);
-    target[method] = (...args) => original('%s', escapeControls(format(...args)));
-  }
-}
-
-function authenticationFailure(ip, method, { write = writeStdout } = {}) {
+function authenticationFailure(ip, method, { write = writeSecurityLog } = {}) {
   const address = clientAddress(ip);
   if (!address || !Object.values(AUTH_METHOD).includes(method)) return;
   try {
@@ -65,7 +46,8 @@ function accessLogger({ getClientIp, write = writeStdout } = {}) {
           method: String(req.method || '').slice(0, 20),
           // Only a router's declared template: raw URLs can contain hook secrets,
           // viewing keys, preview tokens, reset links and credentials in queries.
-          route: typeof req.route?.path === 'string' ? req.route.path : '-',
+          // baseUrl is the router mount path ('/api/auth'); route.path alone drops it.
+          route: typeof req.route?.path === 'string' ? `${typeof req.baseUrl === 'string' ? req.baseUrl : ''}${req.route.path}` : '-',
           status: aborted ? 499 : res.statusCode,
           duration_ms: Math.round(Number(process.hrtime.bigint() - started) / 1e6),
           aborted,
@@ -79,4 +61,4 @@ function accessLogger({ getClientIp, write = writeStdout } = {}) {
   };
 }
 
-module.exports = { accessLogger, authenticationFailure, installConsoleSafety, AUTH_METHOD };
+module.exports = { accessLogger, authenticationFailure, AUTH_METHOD };

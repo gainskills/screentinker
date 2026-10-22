@@ -14,12 +14,13 @@ test('server console records real authentication failures independently of acces
       const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'st-http-log-'));
       const port = await freePort();
       const log = path.join(dir, 'server.log');
+      const securityLog = path.join(dir, 'security.log');
       const fd = fs.openSync(log, 'w');
       const env = { ...process.env };
       delete env.ACCESS_LOG;
       const proc = spawn(process.execPath, ['server.js'], {
         cwd: path.resolve(__dirname, '..'),
-        env: { ...env, PORT: String(port), DATA_DIR: dir, NODE_ENV: 'test', SELF_HOSTED: 'true', ...(enabled === undefined ? {} : { ACCESS_LOG: String(enabled) }), ST_SKIP_DEP_PREFLIGHT: '1', OIDC_PROVIDERS: 'logging-test', OIDC_LOGGING_TEST_ISSUER: 'https://idp.example.test', OIDC_LOGGING_TEST_CLIENT_ID: 'logging-test' },
+        env: { ...env, PORT: String(port), SECURITY_LOG: securityLog, DATA_DIR: dir, NODE_ENV: 'test', SELF_HOSTED: 'true', ...(enabled === undefined ? {} : { ACCESS_LOG: String(enabled) }), ST_SKIP_DEP_PREFLIGHT: '1', OIDC_PROVIDERS: 'logging-test', OIDC_LOGGING_TEST_ISSUER: 'https://idp.example.test', OIDC_LOGGING_TEST_CLIENT_ID: 'logging-test' },
         stdio: ['ignore', fd, fd],
       });
       fs.closeSync(fd);
@@ -70,10 +71,12 @@ test('server console records real authentication failures independently of acces
       await callback.text();
       await new Promise(resolve => setTimeout(resolve, 50));
       const output = fs.readFileSync(log, 'utf8');
-      const security = output.split('\n').filter(line => /^\d{4}-\d\d-\d\dT\d\d:\d\d:\d\d\.\d{3}Z \[security\] /.test(line));
+      // The console is untouched (multi-line diagnostics keep their newlines); real events never go there.
+      assert.doesNotMatch(output, /auth_failure ip=198\.51\.100\./, 'real security events stay out of the console');
+      const security = fs.readFileSync(securityLog, 'utf8').split('\n').filter(Boolean);
       assert.equal(security.length, 10, security.join('\n'));
       assert.ok(security.every(line => line.endsWith('auth_failure ip=198.51.100.40 method=password')), security.join('\n'));
-      assert.ok(output.includes('[oidc] logging-test returned denied\\n'), 'callback error remains on the same diagnostic line');
+      assert.doesNotMatch(fs.readFileSync(securityLog, 'utf8'), /203\.0\.113\.99/, 'forged text cannot reach the security log');
       const access = output.split('\n').filter(line => /^\d{4}-\d\d-\d\dT\d\d:\d\d:\d\d\.\d{3}Z \[access\] /.test(line)).map(line => JSON.parse(line.split(' [access] ')[1]));
       if (enabled) {
         for (const status of [200, 201, 400, 401, 404, 429]) assert.ok(access.some(record => record.status === status), `missing access status ${status}`);
