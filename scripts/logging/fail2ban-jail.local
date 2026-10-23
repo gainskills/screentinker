@@ -1,5 +1,6 @@
 # Install as /etc/fail2ban/jail.d/screentinker.local.
-# Choose and test one action below before setting enabled = true.
+# Defaults: disabled, local firewall. Cloudflare test setup: docs/operations.md#cloudflare-action
+# Configure and test the chosen action before enabling this jail.
 # Bans apply to the IP and can also block working devices sharing that public IP.
 [screentinker]
 enabled = false

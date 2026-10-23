@@ -104,6 +104,51 @@ test('route includes the router mount path', () => {
   assert.equal(JSON.parse(lines[0].split(' [access] ')[1]).route, '/api/auth/login');
 });
 
+test('Express router errors retain the full route template', async t => {
+  const express = require('express');
+  for (const scenario of [
+    { name: 'synchronous error', path: '/login', url: '/api/auth/login', expected: '/api/auth/login' },
+    { name: 'async error in nested routers', path: '/login', url: '/api/auth/login', expected: '/api/auth/login', nested: true },
+    { name: 'parameter and query stay private', path: '/oidc/:slug/callback', url: '/api/auth/oidc/SECRET/callback?token=SECRET', expected: '/api/auth/oidc/:slug/callback' },
+  ]) {
+    await t.test(scenario.name, async () => {
+      const app = express();
+      let recorded;
+      const record = new Promise(resolve => { recorded = resolve; });
+      app.use(accessLogger({ write: line => recorded(JSON.parse(line.split(' [access] ')[1])) }));
+      const router = express.Router();
+      router.get(scenario.path, scenario.nested
+        ? async () => { throw new Error('test error'); }
+        : () => { throw new Error('test error'); });
+      if (scenario.nested) {
+        const parent = express.Router();
+        parent.use('/auth', router);
+        app.use('/api', parent);
+      } else app.use('/api/auth', router);
+      app.use((err, req, res, next) => res.status(500).end());
+
+      // Exercise Express routing and error unwinding without opening a network port.
+      const req = Object.assign(new EventEmitter(), {
+        method: 'GET', url: scenario.url, headers: {}, socket: { remoteAddress: '203.0.113.8' },
+      });
+      const headers = {};
+      const res = Object.assign(new EventEmitter(), {
+        setHeader(name, value) { headers[name] = value; },
+        getHeader(name) { return headers[name]; },
+        end() {
+          Object.defineProperty(this, 'writableFinished', { value: true });
+          this.emit('finish');
+        },
+      });
+      app.handle(req, res);
+      const logged = await record;
+      assert.equal(logged.status, 500);
+      assert.equal(logged.route, scenario.expected);
+      assert.doesNotMatch(JSON.stringify(logged), /SECRET|token=/);
+    });
+  }
+});
+
 test('logging failure does not turn a completed response into an exception', () => {
   const req = { method: 'GET', socket: {} };
   const res = new EventEmitter();

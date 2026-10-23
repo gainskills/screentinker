@@ -34,6 +34,20 @@ function accessLogger({ getClientIp, write = writeStdout } = {}) {
     const started = process.hrtime.bigint();
     let ip = '-';
     try { ip = clientAddress(getClientIp?.(req)) || clientAddress(req.socket?.remoteAddress) || '-'; } catch (_) {}
+    // Express assigns req.route while baseUrl still contains the matched mount.
+    // Capture it then: error propagation restores baseUrl before the response ends.
+    let route = req.route;
+    const template = value => typeof value?.path === 'string'
+      ? `${typeof req.baseUrl === 'string' ? req.baseUrl : ''}${value.path}` : '-';
+    let routePath = template(route);
+    try {
+      Object.defineProperty(req, 'route', {
+        configurable: true,
+        enumerable: true,
+        get: () => route,
+        set(value) { route = value; routePath = template(value); },
+      });
+    } catch (_) {}
     let recorded = false;
     const record = () => {
       if (recorded) return;
@@ -45,8 +59,7 @@ function accessLogger({ getClientIp, write = writeStdout } = {}) {
           method: String(req.method || '').slice(0, 20),
           // Only a router's declared template: raw URLs can contain hook secrets,
           // viewing keys, preview tokens, reset links and credentials in queries.
-          // baseUrl is the router mount path ('/api/auth'); route.path alone drops it.
-          route: typeof req.route?.path === 'string' ? `${typeof req.baseUrl === 'string' ? req.baseUrl : ''}${req.route.path}` : '-',
+          route: routePath,
           status: aborted ? 499 : res.statusCode,
           duration_ms: Math.round(Number(process.hrtime.bigint() - started) / 1e6),
           aborted,
