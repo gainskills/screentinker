@@ -23,6 +23,7 @@ did not behave.
 - [Upgrading Node.js](#upgrading-nodejs)
 - [Upgrading 1.9 to 2.0 on slow storage](#upgrading-19-to-20-on-slow-storage)
 - [Traps worth knowing before they bite](#traps-worth-knowing-before-they-bite)
+- [Fail2ban (optional)](#fail2ban-optional)
 
 ---
 
@@ -467,7 +468,7 @@ before relying on it.
 
 Fail2ban reads failed password/TOTP logins from `SECURITY_LOG` and temporarily bans
 the source IP. The supplied jail bans after 10 failures within 10 minutes and
-automatically unbans after 15 minutes. Logging and the jail are off by default.
+runs its unban action after 15 minutes. Logging and the jail are off by default.
 
 A ban applies to all clients sharing that public IP, including working devices
 behind the same router. The local firewall action blocks the configured ports;
@@ -506,14 +507,156 @@ sudo fail2ban-regex /var/log/screentinker/security.log /etc/fail2ban/filter.d/sc
 Check rotation with `sudo logrotate -f /etc/logrotate.d/screentinker`, then confirm another
 failed login reaches the new file. Logging and filter tests work with the jail disabled.
 
-To enable bans, choose the jail's action and ports using its comments, then set
-`enabled = true`. Cloudflare Tunnel/proxied DNS needs the Cloudflare action and API
-credentials. Run `sudo fail2ban-client -t`; if it passes, reload Fail2ban.
+For direct connections, choose the jail's local firewall action and the public ports
+clients use. For Cloudflare proxy or Tunnel traffic, use the
+[Cloudflare setup and verification](#cloudflare-action). A local firewall
+ban on the visitor's IP does not block a connection arriving through Cloudflare.
+Check the [Nginx/Caddy requirements](#nginx-and-caddy) if either proxy is in front of the app.
 
-For Cloudflare, use an API token authorized to create, list and delete IP Access
-rules for the configured zone. Set `cfzone` and `cftoken` in
-`/etc/fail2ban/action.d/screentinker-cloudflare.local` under `[Init]`, owned by root
-with mode `0600`. See Cloudflare's [token setup](https://developers.cloudflare.com/fundamentals/api/get-started/create-token/),
-[current permissions](https://developers.cloudflare.com/fundamentals/api/reference/permissions/)
-and [IP Access rules API](https://developers.cloudflare.com/api/resources/firewall/subresources/access_rules/)
-for changes to the requirements. The token must remain valid for automatic unbanning.
+After configuring the action, set `enabled = true` and run `sudo fail2ban-client -t`.
+If it passes, reload Fail2ban. Test both blocking and unblocking; a banned-list
+entry alone does not prove that the action succeeded.
+
+### Cloudflare action
+
+This action manages **zone-level IP Access rules**, available on the Free plan.
+It does not use the paid account-level WAF configuration.
+See Cloudflare's [feature availability](https://developers.cloudflare.com/waf/).
+It requires `curl` and Fail2ban's `cloudflare.conf` action with `_cf_api_url` and
+`_cf_api_prms` support, as noted in the [action example](../scripts/logging/examples/fail2ban-cloudflare-action.conf).
+
+#### Configure the token and action
+
+In **My Profile → API Tokens**, create a custom token:
+
+- Permission: **Zone → Firewall Services → Edit**. Select **Zone** in the first dropdown.
+- Zone resources: **Include → Specific zone → your domain**.
+- If you restrict client IPs, allow the server's outgoing public IP.
+
+Use **Edit**, not Read: a token can be active and list rules while creating blocks
+still returns `403 Authentication error`. **Account Firewall Access Rules** is an
+account permission; this action calls the zone endpoint.
+References: [token setup](https://developers.cloudflare.com/fundamentals/api/get-started/create-token/),
+[current permission names](https://developers.cloudflare.com/fundamentals/api/reference/permissions/#zone-permissions),
+[Fail2ban's zone-token example](https://github.com/fail2ban/fail2ban/blob/master/config/action.d/cloudflare-token.conf).
+
+From the repository root:
+
+```sh
+sudo install -m 0644 scripts/logging/examples/fail2ban-cloudflare-action.conf /etc/fail2ban/action.d/screentinker-cloudflare.conf
+sudo touch /etc/fail2ban/action.d/screentinker-cloudflare.local
+sudo chown root:root /etc/fail2ban/action.d/screentinker-cloudflare.local
+sudo chmod 0600 /etc/fail2ban/action.d/screentinker-cloudflare.local
+sudo nano /etc/fail2ban/action.d/screentinker-cloudflare.local
+```
+
+The credentials file needs the section header, too:
+
+```ini
+[Init]
+cfzone = YOUR_ZONE_ID
+cftoken = YOUR_TOKEN_SECRET
+```
+
+Copy the **Zone ID**, not the Account ID, from the domain's overview page.
+Enter only the token secret: no quotes and no `Bearer` prefix.
+
+In `/etc/fail2ban/jail.d/screentinker.local`, replace the existing `action` line
+with `action = screentinker-cloudflare`, then set `enabled = true`.
+For a short test, set `bantime = 2m`. Cloudflare ignores the jail's ports and protocol;
+the IP block applies across the zone. Fail2ban controls when to request its removal.
+
+Validate first:
+
+```sh
+sudo fail2ban-client -t
+```
+
+If validation passes, reload the running service and check its settings:
+
+```sh
+sudo fail2ban-client reload
+sudo fail2ban-client get screentinker actions
+sudo fail2ban-client get screentinker bantime
+```
+
+Expect `screentinker-cloudflare` and `120` seconds for the short test.
+Reload after changing the saved token. An existing ban does not itself retest the action.
+
+#### Verify creating and removing a block
+
+Replace `TEST_IP` below with the test device's current public IP. Use the same
+address throughout; IPv4 and IPv6 are separate addresses.
+
+```sh
+sudo fail2ban-client set screentinker unbanip TEST_IP
+sudo fail2ban-client set screentinker banip TEST_IP
+sudo fail2ban-client status screentinker
+```
+
+An unban result of `0` means there was no active Fail2ban ban to remove.
+In the domain's [IP Access rules](https://developers.cloudflare.com/waf/tools/ip-access-rules/create/),
+confirm a **Block** rule for that exact IP, with a note containing `Fail2Ban screentinker`.
+
+From the test device, request `https://YOUR_HOST/api/auth/config?ban_test=1`.
+It should be blocked. An already loaded login page, or changing `#/login`, does not
+prove access: the fragment change does not request a page from the server.
+
+After `bantime` expires, confirm all three: the IP leaves Fail2ban's banned list,
+the Cloudflare block disappears, and a fresh request reaches the app again.
+To unblock early, run `sudo fail2ban-client set screentinker unbanip TEST_IP`.
+If a Cloudflare rule remains, remove it in Cloudflare before finishing the test.
+Restore `bantime = 15m`, or disable the jail, then validate and reload again.
+
+The inherited `cloudflare.conf` action discards the create/delete response bodies
+and does not check the API's JSON success flag. A Fail2ban `Ban`/`Unban` message alone
+is not confirmation. API failures can leave a block absent or prevent its removal.
+The token and API connection must work at unban time.
+See the [IP Access rules API](https://developers.cloudflare.com/api/resources/firewall/subresources/access_rules/).
+Use `sudo fail2ban-client get logtarget` to locate Fail2ban's logs. Avoid sharing
+configuration dumps or expanded action commands: they can contain the token.
+
+### Nginx and Caddy
+
+The [Nginx](../scripts/logging/examples/nginx.conf) and
+[Caddy](../scripts/logging/examples/Caddyfile) examples cover two layouts:
+
+| Layout | Configuration | Ban action |
+|---|---|---|
+| Client → proxy on this host → app | Default example | Local firewall on the proxy's public ports |
+| Client → Cloudflare Tunnel → local cloudflared → proxy → app | All `TUNNEL` changes in the example | Cloudflare |
+
+The default examples do **not** restore visitor IPs behind Cloudflare's public
+proxy (proxied DNS). They would forward the edge IP instead. That layout needs
+proxy trust configured for Cloudflare's published IP ranges before enabling bans.
+See [Cloudflare's visitor-IP guidance](https://developers.cloudflare.com/support/troubleshooting/restoring-visitor-ips/restoring-original-visitor-ips/).
+
+For the supplied layouts:
+
+- Keep the app's port private. Both examples expect HTTP on `127.0.0.1:3001`.
+  If app TLS is active, port 3001 redirects; the app serves HTTPS on 3443 by default.
+  An HTTPS upstream also needs the correct certificate trust and server name.
+- Nginx needs an existing TLS certificate for the public example. Its Tunnel
+  configuration needs the [realip module](https://nginx.org/en/docs/http/ngx_http_realip_module.html).
+  The example does not add an HTTP-to-HTTPS redirect on port 80.
+- Caddy manages public certificates and redirects using [automatic HTTPS](https://caddyserver.com/docs/automatic-https).
+  The Tunnel configuration needs Caddy 2.8+; the `servers` address must match the
+  loopback bind address and port, as explained in [proxy trust settings](https://caddyserver.com/docs/caddyfile/options#trusted-proxies).
+- The Tunnel examples require `cloudflared` on the same host, outside a separate
+  container network. Set its service URL to `http://127.0.0.1:8080` and preserve the
+  site's public Host header. Cloudflare's [HTTP Host Header setting](https://developers.cloudflare.com/cloudflare-one/networks/connectors/cloudflare-tunnel/configure-tunnels/origin-parameters/#httphostheader)
+  can set it explicitly. Only use the forced forwarded protocol `https` when visitors use HTTPS.
+- For local firewall bans, use the ports clients reach: normally `443`, plus `80`
+  if served. If Caddy serves HTTP/3, include UDP too. The supplied nftables action
+  uses the host INPUT hook; it is not a Docker forwarding-chain configuration.
+
+Validate your installed configuration with `sudo nginx -t` or
+`sudo caddy validate --config /etc/caddy/Caddyfile --adapter caddyfile` before reloading.
+Then submit a wrong login through the public hostname and check `security.log`:
+it must contain the visitor's IP, not the proxy or loopback address.
+Also check that client-supplied `X-Forwarded-For` and `CF-Connecting-IP` values cannot
+replace that address. Do not enable bans until attribution is correct.
+
+For direct traffic, manually ban a test IP, confirm a fresh connection is blocked,
+then verify unblocking. A local ban on the visitor's IP cannot block Cloudflare's
+connection to the origin, even when the app correctly logs the visitor's IP.
