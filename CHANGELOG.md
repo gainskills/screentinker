@@ -1,6 +1,44 @@
 # Changelog
 
+## Unreleased
+
+### Added
+
+- **An LG webOS package for Local application launch mode: `com.lg.app.signage.ipk`.** A panel set
+  to Local mode installs only a package with the id `com.lg.app.signage`, under that file name,
+  from the `application/` folder of a USB stick (Server Settings: Application Launch Mode Local,
+  type IPK, Local Application Upgrade from USB). `ScreenTinker.ipk` could not be installed that way.
+  The release, `/webos`, `/download` and `scripts/upgrade.sh` now carry both builds, and
+  `webos/build-ipk.sh --app-id com.lg.app.signage` builds it. The install steps were worked out on
+  real LG panels by a customer evaluating ScreenTinker. `ScreenTinker.ipk` is unchanged, so panels
+  already running it keep updating from it.
+
+### Fixed
+
+- **The webOS app now updates itself when the server publishes a newer build.** The six-hourly
+  check asked for a capability named `system.update`, but the app announces `system.self_update`,
+  so the check always stopped before downloading anything. It only applies to builds with LG's
+  SCAP library in `webos/vendor/`; the CI-built packages have no SCAP and update the way they were
+  installed. Each build now updates from its own file, which `/webos/version.json` lists under `files`.
+
 ## 3.0.3
+
+### Security: upgrade Node.js
+
+- **The Docker image runs Node.js 22.23.4** (#716), the [October 2026 Node.js security
+  release](https://nodejs.org/en/blog/vulnerability/october-2026-security-releases). Node 22.23.3
+  and earlier are exposed to CVE-2026-111497, an out-of-bounds write in the Brotli decoder that
+  allows remote code execution. ScreenTinker reaches it without signing in: the server accepts
+  Brotli-compressed request bodies, and it also decodes Brotli responses from feeds and other URLs
+  it fetches. The release also fixes TLS hostname checks that could be bypassed (CVE-2026-106069,
+  CVE-2026-106072) and updates OpenSSL, undici and c-ares.
+- **Native installs (Debian, Ubuntu, Raspberry Pi OS) need a Node upgrade, not just this release:**
+  run `sudo apt-get update && sudo apt-get install --only-upgrade nodejs`, check `node -v` is
+  22.23.4 or newer, then restart ScreenTinker. Upgrading ScreenTinker does not change the Node it
+  runs on. Docker installs get the fix by pulling 3.0.3.
+- **The Windows cache node installer bundles Node.js 22.23.4.**
+- The server still starts on Node 22.14.0 or newer; the minimum was not raised, so a host that has
+  not upgraded Node keeps running.
 
 ### Added
 
